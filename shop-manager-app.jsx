@@ -2148,8 +2148,8 @@ function sopWhen(tpl){
   return tpl.startTime ? base+" · "+fmtSopTime(tpl.startTime) : base;
 }
 
-function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpdateRuns,onUpdateSopCats}){
-  function blankTpl(){ return {title:"",categoryId:"",frequency:"daily",dayOfWeek:1,dayOfMonth:1,startTime:"",steps:[{id:uid(),text:""}]}; }
+function SOPsScreen({templates,runs,sopCats,shopUsers,user,isAdmin,onUpdateTemplates,onUpdateRuns,onUpdateSopCats}){
+  function blankTpl(){ return {title:"",categoryId:"",frequency:"daily",dayOfWeek:1,dayOfMonth:1,startTime:"",assignedTo:[],steps:[{id:uid(),text:""}]}; }
 
   const [showAdd,setShowAdd]       = useState(false);
   const [editTpl,setEditTpl]       = useState(null);
@@ -2176,7 +2176,7 @@ function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpd
   }
   function startNewRun(tpl){
     const run={id:uid(),sopId:tpl.id,periodKey:sopPeriodKey(tpl,today),startedBy:user,startedAt:new Date().toISOString(),
-      stepStates:tpl.steps.map(s=>({stepId:s.id,done:false,doneBy:null,doneAt:null})),
+      stepStates:tpl.steps.map(s=>({stepId:s.id,done:false,doneBy:null,doneAt:null,note:""})),
       status:"in-progress",completedBy:null,completedAt:null};
     onUpdateRuns([run,...runs]);
     setRunTplId(tpl.id); setRunId(run.id);
@@ -2186,7 +2186,7 @@ function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpd
     let run=runFor(tpl);
     if(!run){
       run={id:uid(),sopId:tpl.id,periodKey:sopPeriodKey(tpl,today),startedBy:user,startedAt:new Date().toISOString(),
-        stepStates:tpl.steps.map(s=>({stepId:s.id,done:false,doneBy:null,doneAt:null})),
+        stepStates:tpl.steps.map(s=>({stepId:s.id,done:false,doneBy:null,doneAt:null,note:""})),
         status:"in-progress",completedBy:null,completedAt:null};
       onUpdateRuns([run,...runs]);
     }
@@ -2202,9 +2202,14 @@ function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpd
     onUpdateRuns(runs.map(r=>r.id===run.id?updated:r));
   }
 
+  function updateStepNote(run,stepId,note){
+    const stepStates=run.stepStates.map(s=>s.stepId===stepId?{...s,note}:s);
+    onUpdateRuns(runs.map(r=>r.id===run.id?{...r,stepStates}:r));
+  }
+
   function openEdit(tpl){
     setEditTpl(tpl);
-    setNt({title:tpl.title,categoryId:tpl.categoryId||"",frequency:tpl.frequency,dayOfWeek:tpl.dayOfWeek??1,dayOfMonth:tpl.dayOfMonth??1,startTime:tpl.startTime||"",steps:tpl.steps.map(s=>({...s}))});
+    setNt({title:tpl.title,categoryId:tpl.categoryId||"",frequency:tpl.frequency,dayOfWeek:tpl.dayOfWeek??1,dayOfMonth:tpl.dayOfMonth??1,startTime:tpl.startTime||"",assignedTo:tpl.assignedTo||[],steps:tpl.steps.map(s=>({...s}))});
     setShowAdd(true);
   }
   function openAdd(){ setEditTpl(null); setNt(blankTpl()); setShowAdd(true); }
@@ -2214,12 +2219,16 @@ function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpd
     if(!nt.title.trim()||steps.length===0) return;
     const tpl={id:editTpl?.id||uid(),title:nt.title.trim(),categoryId:nt.categoryId||null,
       frequency:nt.frequency,dayOfWeek:nt.frequency==="weekly"?Number(nt.dayOfWeek):null,
-      dayOfMonth:nt.frequency==="monthly"?Number(nt.dayOfMonth):null,startTime:nt.startTime||null,steps,active:true};
+      dayOfMonth:nt.frequency==="monthly"?Number(nt.dayOfMonth):null,startTime:nt.startTime||null,assignedTo:nt.assignedTo||[],steps,active:true};
     if(editTpl) onUpdateTemplates(templates.map(t=>t.id===editTpl.id?tpl:t));
     else onUpdateTemplates([tpl,...templates]);
     setShowAdd(false); setEditTpl(null);
   }
   function deactivateTemplate(id){ onUpdateTemplates(templates.map(t=>t.id===id?{...t,active:false}:t)); setShowAdd(false); }
+
+  function toggleAssignee(name){
+    setNt(p=>({...p,assignedTo:p.assignedTo.includes(name)?p.assignedTo.filter(n=>n!==name):[...p.assignedTo,name]}));
+  }
 
   function addCategory(){
     if(!newCat.name.trim()) return;
@@ -2245,7 +2254,7 @@ function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpd
           <div style={{width:38,height:38,borderRadius:10,background:cat?cat.color+"20":"#F1F5F9",display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0}}>{cat?cat.icon:"🗓️"}</div>
           <div style={{flex:1,minWidth:0}}>
             <p style={{fontFamily:F.display,fontWeight:700,fontSize:14,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{tpl.title}</p>
-            <p style={{fontSize:11,color:C.muted,marginTop:2}}>{sopWhen(tpl)}{cat?" · "+cat.name:""}</p>
+            <p style={{fontSize:11,color:C.muted,marginTop:2}}>{sopWhen(tpl)}{cat?" · "+cat.name:""}{tpl.assignedTo&&tpl.assignedTo.length>0?" · 👤 "+tpl.assignedTo.join(", "):""}</p>
           </div>
         </div>
         <div style={{textAlign:"right",flexShrink:0}}>
@@ -2333,6 +2342,19 @@ function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpd
           <Field label="Start time (optional)">
             <FInput type="time" value={nt.startTime} onChange={v=>setNt(p=>({...p,startTime:v}))}/>
           </Field>
+          <Field label="Assign to (optional — leave blank for anyone)">
+            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+              {shopUsers.map(u=>{
+                const on=nt.assignedTo.includes(u.displayName);
+                return (
+                  <button key={u.id} onClick={()=>toggleAssignee(u.displayName)}
+                    style={{padding:"6px 12px",borderRadius:999,fontSize:12,fontWeight:600,border:`1.5px solid ${on?C.accent:C.border}`,background:on?C.accentLight:"#fff",color:on?C.accent:C.muted}}>
+                    {u.displayName}
+                  </button>
+                );
+              })}
+            </div>
+          </Field>
           <Field label="Steps" required>
             {nt.steps.map((s,i)=>(
               <div key={s.id} style={{display:"flex",gap:6,marginBottom:6}}>
@@ -2358,14 +2380,22 @@ function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpd
           <p style={{fontSize:12,color:C.muted,marginBottom:12}}>{sopWhen(openTpl)} · started by {openRun.startedBy}</p>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {openTpl.steps.map(step=>{
-              const st=openRun.stepStates.find(s=>s.stepId===step.id)||{done:false};
+              const st=openRun.stepStates.find(s=>s.stepId===step.id)||{done:false,note:""};
               return (
-                <div key={step.id} onClick={()=>toggleStep(openRun,step.id)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:9,border:`1.5px solid ${st.done?C.success+"40":C.border}`,background:st.done?C.successLight:"#fff",cursor:"pointer"}}>
-                  <div style={{width:22,height:22,borderRadius:6,border:`2px solid ${st.done?C.success:C.border}`,background:st.done?C.success:"transparent",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:13,flexShrink:0}}>{st.done?"✓":""}</div>
-                  <div style={{flex:1}}>
-                    <p style={{fontSize:13,color:C.text,textDecoration:st.done?"line-through":"none",opacity:st.done?.6:1}}>{step.text}</p>
-                    {st.done&&<p style={{fontSize:10,color:C.mutedLight,marginTop:1}}>{st.doneBy} · {fmtTime(st.doneAt)}</p>}
+                <div key={step.id} style={{borderRadius:9,border:`1.5px solid ${st.done?C.success+"40":C.border}`,background:st.done?C.successLight:"#fff",overflow:"hidden"}}>
+                  <div onClick={()=>toggleStep(openRun,step.id)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",cursor:"pointer"}}>
+                    <div style={{width:22,height:22,borderRadius:6,border:`2px solid ${st.done?C.success:C.border}`,background:st.done?C.success:"transparent",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:13,flexShrink:0}}>{st.done?"✓":""}</div>
+                    <div style={{flex:1}}>
+                      <p style={{fontSize:13,color:C.text,textDecoration:st.done?"line-through":"none",opacity:st.done?.6:1}}>{step.text}</p>
+                      {st.done&&<p style={{fontSize:10,color:C.mutedLight,marginTop:1}}>{st.doneBy} · {fmtTime(st.doneAt)}</p>}
+                    </div>
                   </div>
+                  {st.done&&(
+                    <div style={{padding:"0 12px 10px 44px"}}>
+                      <input value={st.note||""} onChange={e=>updateStepNote(openRun,step.id,e.target.value)} placeholder="Add a note (optional)"
+                        style={{width:"100%",padding:"6px 9px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:12,color:C.text,background:"#fff"}}/>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -2380,15 +2410,26 @@ function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpd
           {(()=>{
             const past=runs.filter(r=>r.sopId===historyTpl.id).sort((a,b)=>new Date(b.startedAt)-new Date(a.startedAt));
             if(past.length===0) return <p style={{fontSize:13,color:C.mutedLight,textAlign:"center",padding:"20px 0"}}>No runs yet.</p>;
-            return past.map(r=>(
-              <div key={r.id} style={{padding:"10px 0",borderBottom:`1px solid ${C.border}`}}>
-                <div style={{display:"flex",justifyContent:"space-between"}}>
-                  <span style={{fontSize:13,fontWeight:700,color:C.text}}>{fmtDate(r.startedAt)}</span>
-                  <span style={{fontSize:12,fontWeight:700,color:r.status==="done"?C.success:C.warn}}>{r.status==="done"?"✅ Done":"⏳ Incomplete"}</span>
+            return past.map(r=>{
+              const noted=r.stepStates.filter(s=>s.note&&s.note.trim());
+              return (
+                <div key={r.id} style={{padding:"10px 0",borderBottom:`1px solid ${C.border}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <span style={{fontSize:13,fontWeight:700,color:C.text}}>{fmtDate(r.startedAt)}</span>
+                    <span style={{fontSize:12,fontWeight:700,color:r.status==="done"?C.success:C.warn}}>{r.status==="done"?"✅ Done":"⏳ Incomplete"}</span>
+                  </div>
+                  <p style={{fontSize:11,color:C.muted,marginTop:2}}>{r.status==="done"?`Completed by ${r.completedBy}`:`Started by ${r.startedBy}`} · {r.stepStates.filter(s=>s.done).length}/{r.stepStates.length} steps</p>
+                  {noted.length>0&&(
+                    <div style={{marginTop:6,paddingLeft:10,borderLeft:`2px solid ${C.border}`}}>
+                      {noted.map(s=>{
+                        const step=historyTpl.steps.find(x=>x.id===s.stepId);
+                        return <p key={s.stepId} style={{fontSize:11,color:C.muted,marginBottom:3}}><b style={{color:C.text}}>{step?step.text:"Step"}:</b> {s.note}</p>;
+                      })}
+                    </div>
+                  )}
                 </div>
-                <p style={{fontSize:11,color:C.muted,marginTop:2}}>{r.status==="done"?`Completed by ${r.completedBy}`:`Started by ${r.startedBy}`} · {r.stepStates.filter(s=>s.done).length}/{r.stepStates.length} steps</p>
-              </div>
-            ));
+              );
+            });
           })()}
         </Modal>
       )}
@@ -2677,7 +2718,7 @@ export default function App(){
         {section==="tasks"&&<TasksScreen tasks={tasks} user={user} shopUsers={shopUsers.filter(u=>(u.shops||[]).includes(currentShop.id)||u.role==="admin")} onUpdateTasks={saveTasks}/>}
         {section==="shared"&&<SharedSpaceScreen currentShop={currentShop} allShops={shopList} user={user} sharedReqs={sharedReqs} onUpdate={saveSharedReqs}/>}
         {section==="prices"&&<PriceListScreen priceItems={priceItems} priceDocs={priceDocs} user={user} onUpdateItems={savePriceItems} onUpdateDocs={savePriceDocs}/>}
-        {section==="sops"&&<SOPsScreen templates={sopTemplates} runs={sopRuns} sopCats={sopCats} user={user} isAdmin={isAdmin} onUpdateTemplates={saveSopTemplates} onUpdateRuns={saveSopRuns} onUpdateSopCats={saveSopCats}/>}
+        {section==="sops"&&<SOPsScreen templates={sopTemplates} runs={sopRuns} sopCats={sopCats} shopUsers={shopUsers.filter(u=>(u.shops||[]).includes(currentShop.id)||u.role==="admin")} user={user} isAdmin={isAdmin} onUpdateTemplates={saveSopTemplates} onUpdateRuns={saveSopRuns} onUpdateSopCats={saveSopCats}/>}
       </div>
 
       <BottomNav section={section} setSection={setSection} badges={badges}/>
