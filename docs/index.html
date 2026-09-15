@@ -6494,6 +6494,7 @@ function SOPsScreen({
   templates,
   runs,
   sopCats,
+  shopUsers,
   user,
   isAdmin,
   onUpdateTemplates,
@@ -6508,6 +6509,7 @@ function SOPsScreen({
       dayOfWeek: 1,
       dayOfMonth: 1,
       startTime: "",
+      assignedTo: [],
       steps: [{
         id: uid(),
         text: ""
@@ -6552,7 +6554,8 @@ function SOPsScreen({
         stepId: s.id,
         done: false,
         doneBy: null,
-        doneAt: null
+        doneAt: null,
+        note: ""
       })),
       status: "in-progress",
       completedBy: null,
@@ -6575,7 +6578,8 @@ function SOPsScreen({
           stepId: s.id,
           done: false,
           doneBy: null,
-          doneAt: null
+          doneAt: null,
+          note: ""
         })),
         status: "in-progress",
         completedBy: null,
@@ -6608,6 +6612,16 @@ function SOPsScreen({
     };
     onUpdateRuns(runs.map(r => r.id === run.id ? updated : r));
   }
+  function updateStepNote(run, stepId, note) {
+    const stepStates = run.stepStates.map(s => s.stepId === stepId ? {
+      ...s,
+      note
+    } : s);
+    onUpdateRuns(runs.map(r => r.id === run.id ? {
+      ...r,
+      stepStates
+    } : r));
+  }
   function openEdit(tpl) {
     setEditTpl(tpl);
     setNt({
@@ -6617,6 +6631,7 @@ function SOPsScreen({
       dayOfWeek: tpl.dayOfWeek ?? 1,
       dayOfMonth: tpl.dayOfMonth ?? 1,
       startTime: tpl.startTime || "",
+      assignedTo: tpl.assignedTo || [],
       steps: tpl.steps.map(s => ({
         ...s
       }))
@@ -6642,6 +6657,7 @@ function SOPsScreen({
       dayOfWeek: nt.frequency === "weekly" ? Number(nt.dayOfWeek) : null,
       dayOfMonth: nt.frequency === "monthly" ? Number(nt.dayOfMonth) : null,
       startTime: nt.startTime || null,
+      assignedTo: nt.assignedTo || [],
       steps,
       active: true
     };
@@ -6655,6 +6671,12 @@ function SOPsScreen({
       active: false
     } : t));
     setShowAdd(false);
+  }
+  function toggleAssignee(name) {
+    setNt(p => ({
+      ...p,
+      assignedTo: p.assignedTo.includes(name) ? p.assignedTo.filter(n => n !== name) : [...p.assignedTo, name]
+    }));
   }
   function addCategory() {
     if (!newCat.name.trim()) return;
@@ -6740,7 +6762,7 @@ function SOPsScreen({
         color: C.muted,
         marginTop: 2
       }
-    }, sopWhen(tpl), cat ? " · " + cat.name : ""))), /*#__PURE__*/React.createElement("div", {
+    }, sopWhen(tpl), cat ? " · " + cat.name : "", tpl.assignedTo && tpl.assignedTo.length > 0 ? " · 👤 " + tpl.assignedTo.join(", ") : ""))), /*#__PURE__*/React.createElement("div", {
       style: {
         textAlign: "right",
         flexShrink: 0
@@ -6982,6 +7004,29 @@ function SOPsScreen({
       startTime: v
     }))
   })), /*#__PURE__*/React.createElement(Field, {
+    label: "Assign to (optional — leave blank for anyone)"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6
+    }
+  }, shopUsers.map(u => {
+    const on = nt.assignedTo.includes(u.displayName);
+    return /*#__PURE__*/React.createElement("button", {
+      key: u.id,
+      onClick: () => toggleAssignee(u.displayName),
+      style: {
+        padding: "6px 12px",
+        borderRadius: 999,
+        fontSize: 12,
+        fontWeight: 600,
+        border: `1.5px solid ${on ? C.accent : C.border}`,
+        background: on ? C.accentLight : "#fff",
+        color: on ? C.accent : C.muted
+      }
+    }, u.displayName);
+  }))), /*#__PURE__*/React.createElement(Field, {
     label: "Steps",
     required: true
   }, nt.steps.map((s, i) => /*#__PURE__*/React.createElement("div", {
@@ -7065,19 +7110,24 @@ function SOPsScreen({
     }
   }, openTpl.steps.map(step => {
     const st = openRun.stepStates.find(s => s.stepId === step.id) || {
-      done: false
+      done: false,
+      note: ""
     };
     return /*#__PURE__*/React.createElement("div", {
       key: step.id,
+      style: {
+        borderRadius: 9,
+        border: `1.5px solid ${st.done ? C.success + "40" : C.border}`,
+        background: st.done ? C.successLight : "#fff",
+        overflow: "hidden"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
       onClick: () => toggleStep(openRun, step.id),
       style: {
         display: "flex",
         alignItems: "center",
         gap: 10,
         padding: "10px 12px",
-        borderRadius: 9,
-        border: `1.5px solid ${st.done ? C.success + "40" : C.border}`,
-        background: st.done ? C.successLight : "#fff",
         cursor: "pointer"
       }
     }, /*#__PURE__*/React.createElement("div", {
@@ -7111,7 +7161,24 @@ function SOPsScreen({
         color: C.mutedLight,
         marginTop: 1
       }
-    }, st.doneBy, " · ", fmtTime(st.doneAt))));
+    }, st.doneBy, " · ", fmtTime(st.doneAt)))), st.done && /*#__PURE__*/React.createElement("div", {
+      style: {
+        padding: "0 12px 10px 44px"
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      value: st.note || "",
+      onChange: e => updateStepNote(openRun, step.id, e.target.value),
+      placeholder: "Add a note (optional)",
+      style: {
+        width: "100%",
+        padding: "6px 9px",
+        borderRadius: 7,
+        border: `1px solid ${C.border}`,
+        fontSize: 12,
+        color: C.text,
+        background: "#fff"
+      }
+    })));
   })), openRun.status === "done" && /*#__PURE__*/React.createElement("p", {
     style: {
       marginTop: 14,
@@ -7133,36 +7200,59 @@ function SOPsScreen({
         padding: "20px 0"
       }
     }, "No runs yet.");
-    return past.map(r => /*#__PURE__*/React.createElement("div", {
-      key: r.id,
-      style: {
-        padding: "10px 0",
-        borderBottom: `1px solid ${C.border}`
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        justifyContent: "space-between"
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 13,
-        fontWeight: 700,
-        color: C.text
-      }
-    }, fmtDate(r.startedAt)), /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 12,
-        fontWeight: 700,
-        color: r.status === "done" ? C.success : C.warn
-      }
-    }, r.status === "done" ? "✅ Done" : "⏳ Incomplete")), /*#__PURE__*/React.createElement("p", {
-      style: {
-        fontSize: 11,
-        color: C.muted,
-        marginTop: 2
-      }
-    }, r.status === "done" ? `Completed by ${r.completedBy}` : `Started by ${r.startedBy}`, " · ", r.stepStates.filter(s => s.done).length, "/", r.stepStates.length, " steps")));
+    return past.map(r => {
+      const noted = r.stepStates.filter(s => s.note && s.note.trim());
+      return /*#__PURE__*/React.createElement("div", {
+        key: r.id,
+        style: {
+          padding: "10px 0",
+          borderBottom: `1px solid ${C.border}`
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          justifyContent: "space-between"
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontSize: 13,
+          fontWeight: 700,
+          color: C.text
+        }
+      }, fmtDate(r.startedAt)), /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontSize: 12,
+          fontWeight: 700,
+          color: r.status === "done" ? C.success : C.warn
+        }
+      }, r.status === "done" ? "✅ Done" : "⏳ Incomplete")), /*#__PURE__*/React.createElement("p", {
+        style: {
+          fontSize: 11,
+          color: C.muted,
+          marginTop: 2
+        }
+      }, r.status === "done" ? `Completed by ${r.completedBy}` : `Started by ${r.startedBy}`, " · ", r.stepStates.filter(s => s.done).length, "/", r.stepStates.length, " steps"), noted.length > 0 && /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginTop: 6,
+          paddingLeft: 10,
+          borderLeft: `2px solid ${C.border}`
+        }
+      }, noted.map(s => {
+        const step = historyTpl.steps.find(x => x.id === s.stepId);
+        return /*#__PURE__*/React.createElement("p", {
+          key: s.stepId,
+          style: {
+            fontSize: 11,
+            color: C.muted,
+            marginBottom: 3
+          }
+        }, /*#__PURE__*/React.createElement("b", {
+          style: {
+            color: C.text
+          }
+        }, step ? step.text : "Step", ":"), " ", s.note);
+      })));
+    });
   })()), showCats && /*#__PURE__*/React.createElement(Modal, {
     title: "SOP Categories",
     onClose: () => setShowCats(false)
@@ -7722,6 +7812,7 @@ function App() {
     templates: sopTemplates,
     runs: sopRuns,
     sopCats: sopCats,
+    shopUsers: shopUsers.filter(u => (u.shops || []).includes(currentShop.id) || u.role === "admin"),
     user: user,
     isAdmin: isAdmin,
     onUpdateTemplates: saveSopTemplates,
