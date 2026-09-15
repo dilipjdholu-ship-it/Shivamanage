@@ -593,8 +593,9 @@ function BottomNav({section,setSection,badges}){
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD
 // ─────────────────────────────────────────────────────────────
-function DashboardScreen({user,custOrders,cats,tasks,priceItems,setSection}){
+function DashboardScreen({user,custOrders,cats,tasks,priceItems,sopTemplates,sopRuns,setSection}){
   const day = new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long"});
+  const today = new Date();
 
   const pendingOrders = custOrders.filter(o=>o.status==="new"||o.status==="processing").length;
   const readyOrders   = custOrders.filter(o=>o.status==="ready").length;
@@ -603,10 +604,18 @@ function DashboardScreen({user,custOrders,cats,tasks,priceItems,setSection}){
   const openTasks     = tasks.filter(t=>t.status!=="done").length;
   const recentOrders  = [...custOrders].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,4);
 
+  const sopDueTodayList = (sopTemplates||[]).filter(t=>t.active!==false&&t.frequency!=="once"&&sopDueToday(t,today));
+  const sopDueCount = sopDueTodayList.filter(t=>{
+    const pk=sopPeriodKey(t,today);
+    const run=(sopRuns||[]).find(r=>r.sopId===t.id&&r.periodKey===pk);
+    return !run||run.status!=="done";
+  }).length;
+
   const cards=[
     { id:"orders",  icon:"🛒", title:"Customer Orders", stat:pendingOrders>0?`${pendingOrders} active`:"All clear", sub:readyOrders>0?`${readyOrders} ready for pickup`:"No pending orders", color:C.accent,   bg:C.accentLight,  urgent:pendingOrders>0 },
     { id:"reorder", icon:"📋", title:"Reorder List",    stat:`${reorderItems} items`,           sub:lowStock>0?`⚠️ ${lowStock} below stock level`:"Stock levels OK", color:"#0891B2",  bg:"#E0F2FE",      urgent:lowStock>0  },
     { id:"tasks",   icon:"✅", title:"Tasks",           stat:openTasks>0?`${openTasks} open`:"All done", sub:"Tap to assign or update",           color:C.purple,  bg:C.purpleLight,  urgent:openTasks>0 },
+    { id:"sops",    icon:"🗓️", title:"SOPs",            stat:sopDueCount>0?`${sopDueCount} due today`:"All caught up", sub:"Checklists & routines", color:"#BE185D", bg:"#FDF2F8",      urgent:sopDueCount>0 },
     { id:"prices",  icon:"💰", title:"Price List",      stat:`${(priceItems||[]).length} items`, sub:"Search rates · share PDFs",               color:"#D97706",  bg:"#FFFBEB",      urgent:false },
   ];
 
@@ -2087,6 +2096,265 @@ function PriceListScreen({priceItems,priceDocs,user,onUpdateItems,onUpdateDocs})
 }
 
 // ─────────────────────────────────────────────────────────────
+// SOP CHECKLISTS SCREEN
+// ─────────────────────────────────────────────────────────────
+const SOP_DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+function ymd(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
+
+function sopPeriodKey(tpl,date){
+  if(tpl.frequency==="daily") return ymd(date);
+  if(tpl.frequency==="weekly"){
+    const d=new Date(date); const wd=(d.getDay()+6)%7; d.setDate(d.getDate()-wd);
+    return "W"+ymd(d);
+  }
+  if(tpl.frequency==="monthly") return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}`;
+  return null; // "once" — every run is fresh, no period bucket
+}
+function sopDueToday(tpl,date){
+  if(tpl.frequency==="daily") return true;
+  if(tpl.frequency==="weekly") return tpl.dayOfWeek===date.getDay();
+  if(tpl.frequency==="monthly") return tpl.dayOfMonth===date.getDate();
+  return false;
+}
+function sopDaysUntil(tpl,date){
+  if(tpl.frequency==="weekly") return (tpl.dayOfWeek-date.getDay()+7)%7;
+  if(tpl.frequency==="monthly"){
+    const dim=new Date(date.getFullYear(),date.getMonth()+1,0).getDate();
+    let diff=tpl.dayOfMonth-date.getDate(); if(diff<0) diff+=dim; return diff;
+  }
+  return 99;
+}
+function sopUpcoming(tpl,date){ const d=sopDaysUntil(tpl,date); return d>0&&d<=6; }
+function sopWhen(tpl){
+  if(tpl.frequency==="daily") return "Every day";
+  if(tpl.frequency==="weekly") return "Every "+SOP_DAYS[tpl.dayOfWeek];
+  if(tpl.frequency==="monthly") return "Day "+tpl.dayOfMonth+" of month";
+  return "One-off";
+}
+
+function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdateRuns}){
+  function blankTpl(){ return {title:"",categoryId:"",frequency:"daily",dayOfWeek:1,dayOfMonth:1,steps:[{id:uid(),text:""}]}; }
+
+  const [showAdd,setShowAdd]       = useState(false);
+  const [editTpl,setEditTpl]       = useState(null);
+  const [runTplId,setRunTplId]     = useState(null);
+  const [runId,setRunId]           = useState(null);
+  const [historyTpl,setHistoryTpl] = useState(null);
+  const [nt,setNt]                 = useState(blankTpl());
+  const today=new Date();
+
+  const active=(templates||[]).filter(t=>t.active!==false);
+  const recurring=active.filter(t=>t.frequency!=="once");
+  const dueToday=recurring.filter(t=>sopDueToday(t,today));
+  const upcoming=recurring.filter(t=>!sopDueToday(t,today)&&sopUpcoming(t,today)).sort((a,b)=>sopDaysUntil(a,today)-sopDaysUntil(b,today));
+  const oneOffs=active.filter(t=>t.frequency==="once");
+
+  function catFor(tpl){ return cats.find(c=>c.id===tpl.categoryId); }
+  function runFor(tpl){
+    if(tpl.frequency==="once") return null;
+    const pk=sopPeriodKey(tpl,today);
+    return runs.find(r=>r.sopId===tpl.id&&r.periodKey===pk)||null;
+  }
+
+  function openTemplate(tpl){
+    let run=runFor(tpl);
+    if(!run){
+      run={id:uid(),sopId:tpl.id,periodKey:sopPeriodKey(tpl,today),startedBy:user,startedAt:new Date().toISOString(),
+        stepStates:tpl.steps.map(s=>({stepId:s.id,done:false,doneBy:null,doneAt:null})),
+        status:"in-progress",completedBy:null,completedAt:null};
+      onUpdateRuns([run,...runs]);
+    }
+    setRunTplId(tpl.id); setRunId(run.id);
+  }
+
+  function toggleStep(run,stepId){
+    const stepStates=run.stepStates.map(s=>s.stepId!==stepId?s:
+      s.done?{...s,done:false,doneBy:null,doneAt:null}:{...s,done:true,doneBy:user,doneAt:new Date().toISOString()});
+    const allDone=stepStates.length>0&&stepStates.every(s=>s.done);
+    const updated={...run,stepStates,status:allDone?"done":"in-progress",
+      completedBy:allDone?user:null,completedAt:allDone?new Date().toISOString():null};
+    onUpdateRuns(runs.map(r=>r.id===run.id?updated:r));
+  }
+
+  function openEdit(tpl){
+    setEditTpl(tpl);
+    setNt({title:tpl.title,categoryId:tpl.categoryId||"",frequency:tpl.frequency,dayOfWeek:tpl.dayOfWeek??1,dayOfMonth:tpl.dayOfMonth??1,steps:tpl.steps.map(s=>({...s}))});
+    setShowAdd(true);
+  }
+  function openAdd(){ setEditTpl(null); setNt(blankTpl()); setShowAdd(true); }
+
+  function saveTemplate(){
+    const steps=nt.steps.map(s=>({...s,text:s.text.trim()})).filter(s=>s.text);
+    if(!nt.title.trim()||steps.length===0) return;
+    const tpl={id:editTpl?.id||uid(),title:nt.title.trim(),categoryId:nt.categoryId||null,
+      frequency:nt.frequency,dayOfWeek:nt.frequency==="weekly"?Number(nt.dayOfWeek):null,
+      dayOfMonth:nt.frequency==="monthly"?Number(nt.dayOfMonth):null,steps,active:true};
+    if(editTpl) onUpdateTemplates(templates.map(t=>t.id===editTpl.id?tpl:t));
+    else onUpdateTemplates([tpl,...templates]);
+    setShowAdd(false); setEditTpl(null);
+  }
+  function deactivateTemplate(id){ onUpdateTemplates(templates.map(t=>t.id===id?{...t,active:false}:t)); setShowAdd(false); }
+
+  const openRun = runId ? runs.find(r=>r.id===runId) : null;
+  const openTpl = runTplId ? templates.find(t=>t.id===runTplId) : null;
+
+  function Row({tpl}){
+    const cat=catFor(tpl);
+    const run=runFor(tpl);
+    const done=run&&run.status==="done";
+    const stepsDone=run?run.stepStates.filter(s=>s.done).length:0;
+    return (
+      <div style={{background:C.surface,borderRadius:10,padding:"12px 13px",border:`1.5px solid ${done?C.success+"40":C.border}`,display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+        <div onClick={()=>openTemplate(tpl)} style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0,cursor:"pointer"}}>
+          <div style={{width:38,height:38,borderRadius:10,background:cat?cat.color+"20":"#F1F5F9",display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0}}>{cat?cat.icon:"🗓️"}</div>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{fontFamily:F.display,fontWeight:700,fontSize:14,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{tpl.title}</p>
+            <p style={{fontSize:11,color:C.muted,marginTop:2}}>{sopWhen(tpl)}{cat?" · "+cat.name:""}</p>
+          </div>
+        </div>
+        <div style={{textAlign:"right",flexShrink:0}}>
+          {done?<span style={{fontSize:11,fontWeight:700,color:C.success}}>✅ Done</span>
+            :run?<span style={{fontSize:11,fontWeight:700,color:C.warn}}>{stepsDone}/{tpl.steps.length}</span>
+            :<span style={{fontSize:11,color:C.mutedLight}}>Not started</span>}
+          {isAdmin&&(
+            <div style={{marginTop:4,display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button onClick={()=>setHistoryTpl(tpl)} style={{fontSize:10,color:C.accent,fontWeight:600}}>History</button>
+              <button onClick={()=>openEdit(tpl)} style={{fontSize:10,color:C.muted,fontWeight:600}}>Edit</button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{padding:"14px 12px 8px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div>
+          <h2 style={{fontFamily:F.display,fontWeight:700,fontSize:18,color:C.text}}>SOPs</h2>
+          <p style={{fontSize:12,color:C.muted,marginTop:1}}>{dueToday.length} due today</p>
+        </div>
+        {isAdmin&&<Btn onClick={openAdd}>+ New SOP</Btn>}
+      </div>
+
+      {dueToday.length>0&&<>
+        <p style={{fontSize:11,fontWeight:700,color:C.danger,textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>🔴 Due today</p>
+        {dueToday.map(t=><Row key={t.id} tpl={t}/>)}
+      </>}
+
+      {upcoming.length>0&&<>
+        <p style={{fontSize:11,fontWeight:700,color:C.warn,textTransform:"uppercase",letterSpacing:".05em",margin:"14px 0 8px"}}>🟡 Upcoming this week</p>
+        {upcoming.map(t=><Row key={t.id} tpl={t}/>)}
+      </>}
+
+      {oneOffs.length>0&&<>
+        <p style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:".05em",margin:"14px 0 8px"}}>⚪ One-off procedures</p>
+        {oneOffs.map(t=><Row key={t.id} tpl={t}/>)}
+      </>}
+
+      {active.length===0&&<div style={{textAlign:"center",padding:"40px 0",color:C.mutedLight,fontSize:13}}>No SOPs set up yet.{isAdmin?" Tap + New SOP to add one.":""}</div>}
+
+      {/* Add/Edit template modal */}
+      {showAdd&&(
+        <Modal title={editTpl?"Edit SOP":"New SOP"} onClose={()=>setShowAdd(false)}>
+          <Field label="Title" required><FInput value={nt.title} onChange={v=>setNt(p=>({...p,title:v}))} placeholder="e.g. Opening checklist"/></Field>
+          <Field label="Category (optional)">
+            <select value={nt.categoryId} onChange={e=>setNt(p=>({...p,categoryId:e.target.value}))}
+              style={{width:"100%",padding:"9px 11px",borderRadius:8,border:`1.5px solid ${C.border}`,fontSize:13,color:C.text,background:"#FAFBFD"}}>
+              <option value="">None</option>
+              {cats.map(c=><option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Frequency">
+            <select value={nt.frequency} onChange={e=>setNt(p=>({...p,frequency:e.target.value}))}
+              style={{width:"100%",padding:"9px 11px",borderRadius:8,border:`1.5px solid ${C.border}`,fontSize:13,color:C.text,background:"#FAFBFD"}}>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+              <option value="once">One-off</option>
+            </select>
+          </Field>
+          {nt.frequency==="weekly"&&(
+            <Field label="Day of week">
+              <select value={nt.dayOfWeek} onChange={e=>setNt(p=>({...p,dayOfWeek:e.target.value}))}
+                style={{width:"100%",padding:"9px 11px",borderRadius:8,border:`1.5px solid ${C.border}`,fontSize:13,color:C.text,background:"#FAFBFD"}}>
+                {SOP_DAYS.map((d,i)=><option key={i} value={i}>{d}</option>)}
+              </select>
+            </Field>
+          )}
+          {nt.frequency==="monthly"&&(
+            <Field label="Day of month">
+              <select value={nt.dayOfMonth} onChange={e=>setNt(p=>({...p,dayOfMonth:e.target.value}))}
+                style={{width:"100%",padding:"9px 11px",borderRadius:8,border:`1.5px solid ${C.border}`,fontSize:13,color:C.text,background:"#FAFBFD"}}>
+                {Array.from({length:28},(_,i)=>i+1).map(d=><option key={d} value={d}>{d}</option>)}
+              </select>
+            </Field>
+          )}
+          <Field label="Steps" required>
+            {nt.steps.map((s,i)=>(
+              <div key={s.id} style={{display:"flex",gap:6,marginBottom:6}}>
+                <FInput value={s.text} onChange={v=>setNt(p=>({...p,steps:p.steps.map(x=>x.id===s.id?{...x,text:v}:x)}))} placeholder={`Step ${i+1}`}/>
+                <button onClick={()=>setNt(p=>({...p,steps:p.steps.filter(x=>x.id!==s.id)}))} style={{color:C.danger,fontSize:16,padding:"0 8px"}}>×</button>
+              </div>
+            ))}
+            <button onClick={()=>setNt(p=>({...p,steps:[...p.steps,{id:uid(),text:""}]}))} style={{fontSize:12,color:C.accent,fontWeight:600}}>+ Add step</button>
+          </Field>
+          <div style={{display:"flex",gap:8,justifyContent:"space-between",marginTop:8}}>
+            {editTpl?<Btn variant="danger" size="sm" onClick={()=>deactivateTemplate(editTpl.id)}>Deactivate</Btn>:<span/>}
+            <div style={{display:"flex",gap:8}}>
+              <Btn variant="ghost" onClick={()=>setShowAdd(false)}>Cancel</Btn>
+              <Btn onClick={saveTemplate}>{editTpl?"Save changes":"Create SOP"}</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Run checklist modal */}
+      {openRun&&openTpl&&(
+        <Modal title={openTpl.title} onClose={()=>{setRunTplId(null);setRunId(null);}}>
+          <p style={{fontSize:12,color:C.muted,marginBottom:12}}>{sopWhen(openTpl)} · started by {openRun.startedBy}</p>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {openTpl.steps.map(step=>{
+              const st=openRun.stepStates.find(s=>s.stepId===step.id)||{done:false};
+              return (
+                <div key={step.id} onClick={()=>toggleStep(openRun,step.id)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:9,border:`1.5px solid ${st.done?C.success+"40":C.border}`,background:st.done?C.successLight:"#fff",cursor:"pointer"}}>
+                  <div style={{width:22,height:22,borderRadius:6,border:`2px solid ${st.done?C.success:C.border}`,background:st.done?C.success:"transparent",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:13,flexShrink:0}}>{st.done?"✓":""}</div>
+                  <div style={{flex:1}}>
+                    <p style={{fontSize:13,color:C.text,textDecoration:st.done?"line-through":"none",opacity:st.done?.6:1}}>{step.text}</p>
+                    {st.done&&<p style={{fontSize:10,color:C.mutedLight,marginTop:1}}>{st.doneBy} · {fmtTime(st.doneAt)}</p>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {openRun.status==="done"&&<p style={{marginTop:14,fontSize:12,fontWeight:700,color:C.success,textAlign:"center"}}>✅ Completed by {openRun.completedBy}</p>}
+        </Modal>
+      )}
+
+      {/* History modal */}
+      {historyTpl&&(
+        <Modal title={historyTpl.title+" — history"} onClose={()=>setHistoryTpl(null)}>
+          {(()=>{
+            const past=runs.filter(r=>r.sopId===historyTpl.id).sort((a,b)=>new Date(b.startedAt)-new Date(a.startedAt));
+            if(past.length===0) return <p style={{fontSize:13,color:C.mutedLight,textAlign:"center",padding:"20px 0"}}>No runs yet.</p>;
+            return past.map(r=>(
+              <div key={r.id} style={{padding:"10px 0",borderBottom:`1px solid ${C.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between"}}>
+                  <span style={{fontSize:13,fontWeight:700,color:C.text}}>{fmtDate(r.startedAt)}</span>
+                  <span style={{fontSize:12,fontWeight:700,color:r.status==="done"?C.success:C.warn}}>{r.status==="done"?"✅ Done":"⏳ Incomplete"}</span>
+                </div>
+                <p style={{fontSize:11,color:C.muted,marginTop:2}}>{r.status==="done"?`Completed by ${r.completedBy}`:`Started by ${r.startedBy}`} · {r.stepStates.filter(s=>s.done).length}/{r.stepStates.length} steps</p>
+              </div>
+            ));
+          })()}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────────────
 export default function App(){
@@ -2102,6 +2370,8 @@ export default function App(){
   const [sharedReqs,setSharedReqs]   = useState([]);
   const [priceItems,setPriceItems]   = useState([]);
   const [priceDocs,setPriceDocs]     = useState([]);
+  const [sopTemplates,setSopTemplates] = useState([]);
+  const [sopRuns,setSopRuns]         = useState([]);
   const [loading,setLoading]         = useState(true);
   const [toast,setToast]             = useState(null);
   const [showUserMgmt,setShowUserMgmt] = useState(false);
@@ -2141,14 +2411,15 @@ export default function App(){
     setLoading(true);
     const sid=currentShop.id;
     async function load(){
-      const [c,ct,t,pi,pd]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/price-items"),sget(sid+"/price-docs")]);
+      const [c,ct,t,pi,pd,st,sr]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/price-items"),sget(sid+"/price-docs"),sget(sid+"/sop-templates"),sget(sid+"/sop-runs")]);
       setCustOrders(c||[]); setCats(ct||INITIAL_CATS); setTasks(t||[]); setPriceItems(pi||[]); setPriceDocs(pd||[]);
+      setSopTemplates(st||[]); setSopRuns(sr||[]);
       setLoading(false);
     }
     load();
     const interval=setInterval(async()=>{
-      const [c,ct,t]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2")]);
-      if(c) setCustOrders(c); if(ct) setCats(ct); if(t) setTasks(t);
+      const [c,ct,t,sr]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/sop-runs")]);
+      if(c) setCustOrders(c); if(ct) setCats(ct); if(t) setTasks(t); if(sr) setSopRuns(sr);
     },5000);
     return()=>clearInterval(interval);
   },[user,currentShop]);
@@ -2177,7 +2448,16 @@ export default function App(){
   const sid=currentShop?.id||"";
   async function saveCustOrders(next){ setCustOrders(next); await sset(sid+"/customer-orders",next); }
   async function saveCats(next){ setCats(next); await sset(sid+"/reorder-cats",next); }
-  async function saveTasks(next){ setTasks(next); await sset(sid+"/tasks-v2",next); }
+  async function saveTasks(next){
+    const added=next.filter(t=>!tasks.some(x=>x.id===t.id));
+    setTasks(next); await sset(sid+"/tasks-v2",next);
+    added.forEach(t=>{
+      if(window.pushNotify){
+        const tag=t.priority==="high"?"🔴 HIGH — ":"";
+        window.pushNotify(`✅ New Task — ${t.title}`,`${tag}Assigned to ${t.assignedTo} by ${t.assignedBy}`);
+      }
+    });
+  }
   async function saveSharedReqs(next){
     const added=next.filter(r=>!sharedReqs.some(s=>s.id===r.id));
     setSharedReqs(next); await sset("shared-requests",next);
@@ -2193,6 +2473,20 @@ export default function App(){
   }
   async function savePriceItems(next){ setPriceItems(next); await sset(sid+"/price-items",next); }
   async function savePriceDocs(next){ setPriceDocs(next); await sset(sid+"/price-docs",next); }
+  async function saveSopTemplates(next){ setSopTemplates(next); await sset(sid+"/sop-templates",next); }
+  async function saveSopRuns(next){
+    const justCompleted=next.filter(r=>{
+      const prev=sopRuns.find(x=>x.id===r.id);
+      return r.status==="done" && (!prev||prev.status!=="done");
+    });
+    setSopRuns(next); await sset(sid+"/sop-runs",next);
+    justCompleted.forEach(r=>{
+      if(window.pushNotify){
+        const tpl=sopTemplates.find(t=>t.id===r.sopId);
+        window.pushNotify(`🗓️ ${tpl?tpl.title:"SOP"} completed`,`Done by ${r.completedBy||user}`);
+      }
+    });
+  }
 
   function upsertOrder(order){
     const isNew=!custOrders.some(o=>o.id===order.id);
@@ -2252,7 +2546,7 @@ export default function App(){
 
   const isAdmin=currentUser.role==="admin";
   const multiShop=userShops.length>1;
-  const sectionTitle={dashboard:"",orders:"Customer Orders",reorder:"Reorder List",tasks:"Tasks",shared:"Shared Space",prices:"Price List"};
+  const sectionTitle={dashboard:"",orders:"Customer Orders",reorder:"Reorder List",tasks:"Tasks",shared:"Shared Space",prices:"Price List",sops:"SOPs"};
 
   return (
     <div style={{minHeight:"100vh",minHeight:"100dvh",background:C.bg,paddingBottom:"calc(72px + env(safe-area-inset-bottom))"}}>
@@ -2304,12 +2598,13 @@ export default function App(){
 
       {/* Full-width content — each section fills screen edge to edge */}
       <div style={{width:"100%",background:C.bg,minHeight:"calc(100dvh - 50px - 72px)"}}>
-        {section==="dashboard"&&<DashboardScreen user={user} custOrders={custOrders} cats={cats} tasks={tasks} priceItems={priceItems} setSection={setSection}/>}
+        {section==="dashboard"&&<DashboardScreen user={user} custOrders={custOrders} cats={cats} tasks={tasks} priceItems={priceItems} sopTemplates={sopTemplates} sopRuns={sopRuns} setSection={setSection}/>}
         {section==="orders"&&<CustomerOrdersScreen orders={custOrders} user={user} onUpdate={updateOrder} onAdd={upsertOrder} onDelete={deleteOrder}/>}
         {section==="reorder"&&<ReorderScreen cats={cats} user={user} onUpdateCats={saveCats} showToast={setToast}/>}
         {section==="tasks"&&<TasksScreen tasks={tasks} user={user} shopUsers={shopUsers.filter(u=>(u.shops||[]).includes(currentShop.id)||u.role==="admin")} onUpdateTasks={saveTasks}/>}
         {section==="shared"&&<SharedSpaceScreen currentShop={currentShop} allShops={shopList} user={user} sharedReqs={sharedReqs} onUpdate={saveSharedReqs}/>}
         {section==="prices"&&<PriceListScreen priceItems={priceItems} priceDocs={priceDocs} user={user} onUpdateItems={savePriceItems} onUpdateDocs={savePriceDocs}/>}
+        {section==="sops"&&<SOPsScreen templates={sopTemplates} runs={sopRuns} cats={cats} user={user} isAdmin={isAdmin} onUpdateTemplates={saveSopTemplates} onUpdateRuns={saveSopRuns}/>}
       </div>
 
       <BottomNav section={section} setSection={setSection} badges={badges}/>
