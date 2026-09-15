@@ -2099,6 +2099,7 @@ function PriceListScreen({priceItems,priceDocs,user,onUpdateItems,onUpdateDocs})
 // SOP CHECKLISTS SCREEN
 // ─────────────────────────────────────────────────────────────
 const SOP_DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+const CAT_COLORS=["#1D4ED8","#0891B2","#7C3AED","#059669","#D97706","#DC2626","#BE185D","#65A30D","#0F172A","#6B7280"];
 
 function ymd(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 
@@ -2126,15 +2127,29 @@ function sopDaysUntil(tpl,date){
   return 99;
 }
 function sopUpcoming(tpl,date){ const d=sopDaysUntil(tpl,date); return d>0&&d<=6; }
+function fmtSopTime(t){
+  if(!t) return "";
+  const [h,m]=t.split(":").map(Number);
+  const ampm=h>=12?"PM":"AM"; const h12=h%12||12;
+  return `${h12}:${String(m).padStart(2,"0")} ${ampm}`;
+}
+function sopTimeSort(a,b){
+  if(a.startTime&&b.startTime) return a.startTime.localeCompare(b.startTime);
+  if(a.startTime) return -1;
+  if(b.startTime) return 1;
+  return 0;
+}
 function sopWhen(tpl){
-  if(tpl.frequency==="daily") return "Every day";
-  if(tpl.frequency==="weekly") return "Every "+SOP_DAYS[tpl.dayOfWeek];
-  if(tpl.frequency==="monthly") return "Day "+tpl.dayOfMonth+" of month";
-  return "One-off";
+  let base;
+  if(tpl.frequency==="daily") base="Every day";
+  else if(tpl.frequency==="weekly") base="Every "+SOP_DAYS[tpl.dayOfWeek];
+  else if(tpl.frequency==="monthly") base="Day "+tpl.dayOfMonth+" of month";
+  else base="One-off";
+  return tpl.startTime ? base+" · "+fmtSopTime(tpl.startTime) : base;
 }
 
-function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdateRuns}){
-  function blankTpl(){ return {title:"",categoryId:"",frequency:"daily",dayOfWeek:1,dayOfMonth:1,steps:[{id:uid(),text:""}]}; }
+function SOPsScreen({templates,runs,sopCats,user,isAdmin,onUpdateTemplates,onUpdateRuns,onUpdateSopCats}){
+  function blankTpl(){ return {title:"",categoryId:"",frequency:"daily",dayOfWeek:1,dayOfMonth:1,startTime:"",steps:[{id:uid(),text:""}]}; }
 
   const [showAdd,setShowAdd]       = useState(false);
   const [editTpl,setEditTpl]       = useState(null);
@@ -2142,19 +2157,29 @@ function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdate
   const [runId,setRunId]           = useState(null);
   const [historyTpl,setHistoryTpl] = useState(null);
   const [nt,setNt]                 = useState(blankTpl());
+  const [showCats,setShowCats]     = useState(false);
+  const [newCat,setNewCat]         = useState({name:"",icon:"📌",color:CAT_COLORS[0]});
   const today=new Date();
 
   const active=(templates||[]).filter(t=>t.active!==false);
   const recurring=active.filter(t=>t.frequency!=="once");
-  const dueToday=recurring.filter(t=>sopDueToday(t,today));
-  const upcoming=recurring.filter(t=>!sopDueToday(t,today)&&sopUpcoming(t,today)).sort((a,b)=>sopDaysUntil(a,today)-sopDaysUntil(b,today));
+  const dueToday=recurring.filter(t=>sopDueToday(t,today)).sort(sopTimeSort);
+  const upcoming=recurring.filter(t=>!sopDueToday(t,today)).sort((a,b)=>sopDaysUntil(a,today)-sopDaysUntil(b,today)||sopTimeSort(a,b));
   const oneOffs=active.filter(t=>t.frequency==="once");
 
-  function catFor(tpl){ return cats.find(c=>c.id===tpl.categoryId); }
+  function catFor(tpl){ return sopCats.find(c=>c.id===tpl.categoryId); }
   function runFor(tpl){
-    if(tpl.frequency==="once") return null;
+    const matches=runs.filter(r=>r.sopId===tpl.id);
+    if(tpl.frequency==="once") return matches.sort((a,b)=>new Date(b.startedAt)-new Date(a.startedAt))[0]||null;
     const pk=sopPeriodKey(tpl,today);
-    return runs.find(r=>r.sopId===tpl.id&&r.periodKey===pk)||null;
+    return matches.find(r=>r.periodKey===pk)||null;
+  }
+  function startNewRun(tpl){
+    const run={id:uid(),sopId:tpl.id,periodKey:sopPeriodKey(tpl,today),startedBy:user,startedAt:new Date().toISOString(),
+      stepStates:tpl.steps.map(s=>({stepId:s.id,done:false,doneBy:null,doneAt:null})),
+      status:"in-progress",completedBy:null,completedAt:null};
+    onUpdateRuns([run,...runs]);
+    setRunTplId(tpl.id); setRunId(run.id);
   }
 
   function openTemplate(tpl){
@@ -2179,7 +2204,7 @@ function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdate
 
   function openEdit(tpl){
     setEditTpl(tpl);
-    setNt({title:tpl.title,categoryId:tpl.categoryId||"",frequency:tpl.frequency,dayOfWeek:tpl.dayOfWeek??1,dayOfMonth:tpl.dayOfMonth??1,steps:tpl.steps.map(s=>({...s}))});
+    setNt({title:tpl.title,categoryId:tpl.categoryId||"",frequency:tpl.frequency,dayOfWeek:tpl.dayOfWeek??1,dayOfMonth:tpl.dayOfMonth??1,startTime:tpl.startTime||"",steps:tpl.steps.map(s=>({...s}))});
     setShowAdd(true);
   }
   function openAdd(){ setEditTpl(null); setNt(blankTpl()); setShowAdd(true); }
@@ -2189,12 +2214,22 @@ function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdate
     if(!nt.title.trim()||steps.length===0) return;
     const tpl={id:editTpl?.id||uid(),title:nt.title.trim(),categoryId:nt.categoryId||null,
       frequency:nt.frequency,dayOfWeek:nt.frequency==="weekly"?Number(nt.dayOfWeek):null,
-      dayOfMonth:nt.frequency==="monthly"?Number(nt.dayOfMonth):null,steps,active:true};
+      dayOfMonth:nt.frequency==="monthly"?Number(nt.dayOfMonth):null,startTime:nt.startTime||null,steps,active:true};
     if(editTpl) onUpdateTemplates(templates.map(t=>t.id===editTpl.id?tpl:t));
     else onUpdateTemplates([tpl,...templates]);
     setShowAdd(false); setEditTpl(null);
   }
   function deactivateTemplate(id){ onUpdateTemplates(templates.map(t=>t.id===id?{...t,active:false}:t)); setShowAdd(false); }
+
+  function addCategory(){
+    if(!newCat.name.trim()) return;
+    onUpdateSopCats([...sopCats,{id:uid(),name:newCat.name.trim(),icon:newCat.icon.trim()||"📌",color:newCat.color}]);
+    setNewCat({name:"",icon:"📌",color:CAT_COLORS[0]});
+  }
+  function deleteCategory(id){
+    onUpdateSopCats(sopCats.filter(c=>c.id!==id));
+    if(templates.some(t=>t.categoryId===id)) onUpdateTemplates(templates.map(t=>t.categoryId===id?{...t,categoryId:null}:t));
+  }
 
   const openRun = runId ? runs.find(r=>r.id===runId) : null;
   const openTpl = runTplId ? templates.find(t=>t.id===runTplId) : null;
@@ -2217,12 +2252,11 @@ function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdate
           {done?<span style={{fontSize:11,fontWeight:700,color:C.success}}>✅ Done</span>
             :run?<span style={{fontSize:11,fontWeight:700,color:C.warn}}>{stepsDone}/{tpl.steps.length}</span>
             :<span style={{fontSize:11,color:C.mutedLight}}>Not started</span>}
-          {isAdmin&&(
-            <div style={{marginTop:4,display:"flex",gap:8,justifyContent:"flex-end"}}>
-              <button onClick={()=>setHistoryTpl(tpl)} style={{fontSize:10,color:C.accent,fontWeight:600}}>History</button>
-              <button onClick={()=>openEdit(tpl)} style={{fontSize:10,color:C.muted,fontWeight:600}}>Edit</button>
-            </div>
-          )}
+          <div style={{marginTop:4,display:"flex",gap:8,justifyContent:"flex-end"}}>
+            {tpl.frequency==="once"&&done&&<button onClick={()=>startNewRun(tpl)} style={{fontSize:10,color:C.accent,fontWeight:600}}>▶ Start new</button>}
+            {isAdmin&&<button onClick={()=>setHistoryTpl(tpl)} style={{fontSize:10,color:C.accent,fontWeight:600}}>History</button>}
+            {isAdmin&&<button onClick={()=>openEdit(tpl)} style={{fontSize:10,color:C.muted,fontWeight:600}}>Edit</button>}
+          </div>
         </div>
       </div>
     );
@@ -2235,7 +2269,12 @@ function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdate
           <h2 style={{fontFamily:F.display,fontWeight:700,fontSize:18,color:C.text}}>SOPs</h2>
           <p style={{fontSize:12,color:C.muted,marginTop:1}}>{dueToday.length} due today</p>
         </div>
-        {isAdmin&&<Btn onClick={openAdd}>+ New SOP</Btn>}
+        {isAdmin&&(
+          <div style={{display:"flex",gap:8}}>
+            <Btn variant="ghost" size="sm" onClick={()=>setShowCats(true)}>🏷️ Categories</Btn>
+            <Btn onClick={openAdd}>+ New SOP</Btn>
+          </div>
+        )}
       </div>
 
       {dueToday.length>0&&<>
@@ -2244,7 +2283,7 @@ function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdate
       </>}
 
       {upcoming.length>0&&<>
-        <p style={{fontSize:11,fontWeight:700,color:C.warn,textTransform:"uppercase",letterSpacing:".05em",margin:"14px 0 8px"}}>🟡 Upcoming this week</p>
+        <p style={{fontSize:11,fontWeight:700,color:C.warn,textTransform:"uppercase",letterSpacing:".05em",margin:"14px 0 8px"}}>🟡 Upcoming</p>
         {upcoming.map(t=><Row key={t.id} tpl={t}/>)}
       </>}
 
@@ -2263,7 +2302,7 @@ function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdate
             <select value={nt.categoryId} onChange={e=>setNt(p=>({...p,categoryId:e.target.value}))}
               style={{width:"100%",padding:"9px 11px",borderRadius:8,border:`1.5px solid ${C.border}`,fontSize:13,color:C.text,background:"#FAFBFD"}}>
               <option value="">None</option>
-              {cats.map(c=><option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
+              {sopCats.map(c=><option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
             </select>
           </Field>
           <Field label="Frequency">
@@ -2291,6 +2330,9 @@ function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdate
               </select>
             </Field>
           )}
+          <Field label="Start time (optional)">
+            <FInput type="time" value={nt.startTime} onChange={v=>setNt(p=>({...p,startTime:v}))}/>
+          </Field>
           <Field label="Steps" required>
             {nt.steps.map((s,i)=>(
               <div key={s.id} style={{display:"flex",gap:6,marginBottom:6}}>
@@ -2350,6 +2392,35 @@ function SOPsScreen({templates,runs,cats,user,isAdmin,onUpdateTemplates,onUpdate
           })()}
         </Modal>
       )}
+
+      {/* Category manager modal */}
+      {showCats&&(
+        <Modal title="SOP Categories" onClose={()=>setShowCats(false)}>
+          <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+            {sopCats.length===0&&<p style={{fontSize:13,color:C.mutedLight,textAlign:"center",padding:"12px 0"}}>No categories yet.</p>}
+            {sopCats.map(c=>(
+              <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:9,border:`1.5px solid ${C.border}`}}>
+                <div style={{width:30,height:30,borderRadius:8,background:c.color+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{c.icon}</div>
+                <span style={{flex:1,fontSize:13,fontWeight:600,color:C.text}}>{c.name}</span>
+                <button onClick={()=>deleteCategory(c.id)} style={{color:C.danger,fontSize:16,padding:"0 8px"}}>×</button>
+              </div>
+            ))}
+          </div>
+          <Field label="Add a category">
+            <div style={{display:"flex",gap:6,marginBottom:8}}>
+              <FInput value={newCat.icon} onChange={v=>setNewCat(p=>({...p,icon:v}))} style={{width:50,textAlign:"center"}} placeholder="🏷️"/>
+              <FInput value={newCat.name} onChange={v=>setNewCat(p=>({...p,name:v}))} placeholder="Category name"/>
+            </div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+              {CAT_COLORS.map(col=>(
+                <button key={col} onClick={()=>setNewCat(p=>({...p,color:col}))}
+                  style={{width:24,height:24,borderRadius:"50%",background:col,border:newCat.color===col?`2.5px solid ${C.text}`:"2px solid transparent"}}/>
+              ))}
+            </div>
+            <Btn onClick={addCategory} disabled={!newCat.name.trim()} size="sm">+ Add category</Btn>
+          </Field>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -2372,6 +2443,7 @@ export default function App(){
   const [priceDocs,setPriceDocs]     = useState([]);
   const [sopTemplates,setSopTemplates] = useState([]);
   const [sopRuns,setSopRuns]         = useState([]);
+  const [sopCats,setSopCats]         = useState([]);
   const [loading,setLoading]         = useState(true);
   const [toast,setToast]             = useState(null);
   const [showUserMgmt,setShowUserMgmt] = useState(false);
@@ -2411,9 +2483,9 @@ export default function App(){
     setLoading(true);
     const sid=currentShop.id;
     async function load(){
-      const [c,ct,t,pi,pd,st,sr]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/price-items"),sget(sid+"/price-docs"),sget(sid+"/sop-templates"),sget(sid+"/sop-runs")]);
+      const [c,ct,t,pi,pd,st,sr,sc]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/price-items"),sget(sid+"/price-docs"),sget(sid+"/sop-templates"),sget(sid+"/sop-runs"),sget(sid+"/sop-categories")]);
       setCustOrders(c||[]); setCats(ct||INITIAL_CATS); setTasks(t||[]); setPriceItems(pi||[]); setPriceDocs(pd||[]);
-      setSopTemplates(st||[]); setSopRuns(sr||[]);
+      setSopTemplates(st||[]); setSopRuns(sr||[]); setSopCats(sc||[]);
       setLoading(false);
     }
     load();
@@ -2474,6 +2546,7 @@ export default function App(){
   async function savePriceItems(next){ setPriceItems(next); await sset(sid+"/price-items",next); }
   async function savePriceDocs(next){ setPriceDocs(next); await sset(sid+"/price-docs",next); }
   async function saveSopTemplates(next){ setSopTemplates(next); await sset(sid+"/sop-templates",next); }
+  async function saveSopCats(next){ setSopCats(next); await sset(sid+"/sop-categories",next); }
   async function saveSopRuns(next){
     const justCompleted=next.filter(r=>{
       const prev=sopRuns.find(x=>x.id===r.id);
@@ -2604,7 +2677,7 @@ export default function App(){
         {section==="tasks"&&<TasksScreen tasks={tasks} user={user} shopUsers={shopUsers.filter(u=>(u.shops||[]).includes(currentShop.id)||u.role==="admin")} onUpdateTasks={saveTasks}/>}
         {section==="shared"&&<SharedSpaceScreen currentShop={currentShop} allShops={shopList} user={user} sharedReqs={sharedReqs} onUpdate={saveSharedReqs}/>}
         {section==="prices"&&<PriceListScreen priceItems={priceItems} priceDocs={priceDocs} user={user} onUpdateItems={savePriceItems} onUpdateDocs={savePriceDocs}/>}
-        {section==="sops"&&<SOPsScreen templates={sopTemplates} runs={sopRuns} cats={cats} user={user} isAdmin={isAdmin} onUpdateTemplates={saveSopTemplates} onUpdateRuns={saveSopRuns}/>}
+        {section==="sops"&&<SOPsScreen templates={sopTemplates} runs={sopRuns} sopCats={sopCats} user={user} isAdmin={isAdmin} onUpdateTemplates={saveSopTemplates} onUpdateRuns={saveSopRuns} onUpdateSopCats={saveSopCats}/>}
       </div>
 
       <BottomNav section={section} setSection={setSection} badges={badges}/>
