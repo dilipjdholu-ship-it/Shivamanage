@@ -1,0 +1,18 @@
+{
+  "name": "Shop Manager",
+  "short_name": "ShopMgr",
+  "description": "Manage Shivam Hardware & Satyam Traders",
+  "start_url": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#1A2D5A",
+  "background_color": "#F0F4F8",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
