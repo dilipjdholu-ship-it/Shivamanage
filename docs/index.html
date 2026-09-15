@@ -2021,6 +2021,8 @@ function DashboardScreen({
   cats,
   tasks,
   priceItems,
+  sopTemplates,
+  sopRuns,
   setSection
 }) {
   const day = new Date().toLocaleDateString("en-IN", {
@@ -2028,12 +2030,19 @@ function DashboardScreen({
     day: "numeric",
     month: "long"
   });
+  const today = new Date();
   const pendingOrders = custOrders.filter(o => o.status === "new" || o.status === "processing").length;
   const readyOrders = custOrders.filter(o => o.status === "ready").length;
   const lowStock = cats.reduce((s, c) => s + c.items.filter(i => i.qty != null && i.qty < i.reorderLevel).length, 0);
   const reorderItems = cats.reduce((s, c) => s + c.items.filter(i => !i.ordered).length, 0);
   const openTasks = tasks.filter(t => t.status !== "done").length;
   const recentOrders = [...custOrders].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 4);
+  const sopDueTodayList = (sopTemplates || []).filter(t => t.active !== false && t.frequency !== "once" && sopDueToday(t, today));
+  const sopDueCount = sopDueTodayList.filter(t => {
+    const pk = sopPeriodKey(t, today);
+    const run = (sopRuns || []).find(r => r.sopId === t.id && r.periodKey === pk);
+    return !run || run.status !== "done";
+  }).length;
   const cards = [{
     id: "orders",
     icon: "🛒",
@@ -2061,6 +2070,15 @@ function DashboardScreen({
     color: C.purple,
     bg: C.purpleLight,
     urgent: openTasks > 0
+  }, {
+    id: "sops",
+    icon: "🗓️",
+    title: "SOPs",
+    stat: sopDueCount > 0 ? `${sopDueCount} due today` : "All caught up",
+    sub: "Checklists & routines",
+    color: "#BE185D",
+    bg: "#FDF2F8",
+    urgent: sopDueCount > 0
   }, {
     id: "prices",
     icon: "💰",
@@ -6416,6 +6434,648 @@ function PriceListScreen({
 }
 
 // ─────────────────────────────────────────────────────────────
+// SOP CHECKLISTS SCREEN
+// ─────────────────────────────────────────────────────────────
+const SOP_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+function ymd(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function sopPeriodKey(tpl, date) {
+  if (tpl.frequency === "daily") return ymd(date);
+  if (tpl.frequency === "weekly") {
+    const d = new Date(date);
+    const wd = (d.getDay() + 6) % 7;
+    d.setDate(d.getDate() - wd);
+    return "W" + ymd(d);
+  }
+  if (tpl.frequency === "monthly") return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+  return null; // "once" — every run is fresh, no period bucket
+}
+function sopDueToday(tpl, date) {
+  if (tpl.frequency === "daily") return true;
+  if (tpl.frequency === "weekly") return tpl.dayOfWeek === date.getDay();
+  if (tpl.frequency === "monthly") return tpl.dayOfMonth === date.getDate();
+  return false;
+}
+function sopDaysUntil(tpl, date) {
+  if (tpl.frequency === "weekly") return (tpl.dayOfWeek - date.getDay() + 7) % 7;
+  if (tpl.frequency === "monthly") {
+    const dim = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+    let diff = tpl.dayOfMonth - date.getDate();
+    if (diff < 0) diff += dim;
+    return diff;
+  }
+  return 99;
+}
+function sopUpcoming(tpl, date) {
+  const d = sopDaysUntil(tpl, date);
+  return d > 0 && d <= 6;
+}
+function sopWhen(tpl) {
+  if (tpl.frequency === "daily") return "Every day";
+  if (tpl.frequency === "weekly") return "Every " + SOP_DAYS[tpl.dayOfWeek];
+  if (tpl.frequency === "monthly") return "Day " + tpl.dayOfMonth + " of month";
+  return "One-off";
+}
+function SOPsScreen({
+  templates,
+  runs,
+  cats,
+  user,
+  isAdmin,
+  onUpdateTemplates,
+  onUpdateRuns
+}) {
+  function blankTpl() {
+    return {
+      title: "",
+      categoryId: "",
+      frequency: "daily",
+      dayOfWeek: 1,
+      dayOfMonth: 1,
+      steps: [{
+        id: uid(),
+        text: ""
+      }]
+    };
+  }
+  const [showAdd, setShowAdd] = useState(false);
+  const [editTpl, setEditTpl] = useState(null);
+  const [runTplId, setRunTplId] = useState(null);
+  const [runId, setRunId] = useState(null);
+  const [historyTpl, setHistoryTpl] = useState(null);
+  const [nt, setNt] = useState(blankTpl());
+  const today = new Date();
+  const active = (templates || []).filter(t => t.active !== false);
+  const recurring = active.filter(t => t.frequency !== "once");
+  const dueToday = recurring.filter(t => sopDueToday(t, today));
+  const upcoming = recurring.filter(t => !sopDueToday(t, today) && sopUpcoming(t, today)).sort((a, b) => sopDaysUntil(a, today) - sopDaysUntil(b, today));
+  const oneOffs = active.filter(t => t.frequency === "once");
+  function catFor(tpl) {
+    return cats.find(c => c.id === tpl.categoryId);
+  }
+  function runFor(tpl) {
+    if (tpl.frequency === "once") return null;
+    const pk = sopPeriodKey(tpl, today);
+    return runs.find(r => r.sopId === tpl.id && r.periodKey === pk) || null;
+  }
+  function openTemplate(tpl) {
+    let run = runFor(tpl);
+    if (!run) {
+      run = {
+        id: uid(),
+        sopId: tpl.id,
+        periodKey: sopPeriodKey(tpl, today),
+        startedBy: user,
+        startedAt: new Date().toISOString(),
+        stepStates: tpl.steps.map(s => ({
+          stepId: s.id,
+          done: false,
+          doneBy: null,
+          doneAt: null
+        })),
+        status: "in-progress",
+        completedBy: null,
+        completedAt: null
+      };
+      onUpdateRuns([run, ...runs]);
+    }
+    setRunTplId(tpl.id);
+    setRunId(run.id);
+  }
+  function toggleStep(run, stepId) {
+    const stepStates = run.stepStates.map(s => s.stepId !== stepId ? s : s.done ? {
+      ...s,
+      done: false,
+      doneBy: null,
+      doneAt: null
+    } : {
+      ...s,
+      done: true,
+      doneBy: user,
+      doneAt: new Date().toISOString()
+    });
+    const allDone = stepStates.length > 0 && stepStates.every(s => s.done);
+    const updated = {
+      ...run,
+      stepStates,
+      status: allDone ? "done" : "in-progress",
+      completedBy: allDone ? user : null,
+      completedAt: allDone ? new Date().toISOString() : null
+    };
+    onUpdateRuns(runs.map(r => r.id === run.id ? updated : r));
+  }
+  function openEdit(tpl) {
+    setEditTpl(tpl);
+    setNt({
+      title: tpl.title,
+      categoryId: tpl.categoryId || "",
+      frequency: tpl.frequency,
+      dayOfWeek: tpl.dayOfWeek ?? 1,
+      dayOfMonth: tpl.dayOfMonth ?? 1,
+      steps: tpl.steps.map(s => ({
+        ...s
+      }))
+    });
+    setShowAdd(true);
+  }
+  function openAdd() {
+    setEditTpl(null);
+    setNt(blankTpl());
+    setShowAdd(true);
+  }
+  function saveTemplate() {
+    const steps = nt.steps.map(s => ({
+      ...s,
+      text: s.text.trim()
+    })).filter(s => s.text);
+    if (!nt.title.trim() || steps.length === 0) return;
+    const tpl = {
+      id: editTpl?.id || uid(),
+      title: nt.title.trim(),
+      categoryId: nt.categoryId || null,
+      frequency: nt.frequency,
+      dayOfWeek: nt.frequency === "weekly" ? Number(nt.dayOfWeek) : null,
+      dayOfMonth: nt.frequency === "monthly" ? Number(nt.dayOfMonth) : null,
+      steps,
+      active: true
+    };
+    if (editTpl) onUpdateTemplates(templates.map(t => t.id === editTpl.id ? tpl : t));else onUpdateTemplates([tpl, ...templates]);
+    setShowAdd(false);
+    setEditTpl(null);
+  }
+  function deactivateTemplate(id) {
+    onUpdateTemplates(templates.map(t => t.id === id ? {
+      ...t,
+      active: false
+    } : t));
+    setShowAdd(false);
+  }
+  const openRun = runId ? runs.find(r => r.id === runId) : null;
+  const openTpl = runTplId ? templates.find(t => t.id === runTplId) : null;
+  function Row({
+    tpl
+  }) {
+    const cat = catFor(tpl);
+    const run = runFor(tpl);
+    const done = run && run.status === "done";
+    const stepsDone = run ? run.stepStates.filter(s => s.done).length : 0;
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: C.surface,
+        borderRadius: 10,
+        padding: "12px 13px",
+        border: `1.5px solid ${done ? C.success + "40" : C.border}`,
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        marginBottom: 8
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      onClick: () => openTemplate(tpl),
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        flex: 1,
+        minWidth: 0,
+        cursor: "pointer"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 38,
+        height: 38,
+        borderRadius: 10,
+        background: cat ? cat.color + "20" : "#F1F5F9",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontSize: 17,
+        flexShrink: 0
+      }
+    }, cat ? cat.icon : "🗓️"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontFamily: F.display,
+        fontWeight: 700,
+        fontSize: 14,
+        color: C.text,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, tpl.title), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        marginTop: 2
+      }
+    }, sopWhen(tpl), cat ? " · " + cat.name : ""))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        textAlign: "right",
+        flexShrink: 0
+      }
+    }, done ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        fontWeight: 700,
+        color: C.success
+      }
+    }, "✅ Done") : run ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        fontWeight: 700,
+        color: C.warn
+      }
+    }, stepsDone, "/", tpl.steps.length) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        color: C.mutedLight
+      }
+    }, "Not started"), isAdmin && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 4,
+        display: "flex",
+        gap: 8,
+        justifyContent: "flex-end"
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setHistoryTpl(tpl),
+      style: {
+        fontSize: 10,
+        color: C.accent,
+        fontWeight: 600
+      }
+    }, "History"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => openEdit(tpl),
+      style: {
+        fontSize: 10,
+        color: C.muted,
+        fontWeight: 600
+      }
+    }, "Edit"))));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "14px 12px 8px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      fontFamily: F.display,
+      fontWeight: 700,
+      fontSize: 18,
+      color: C.text
+    }
+  }, "SOPs"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: C.muted,
+      marginTop: 1
+    }
+  }, dueToday.length, " due today")), isAdmin && /*#__PURE__*/React.createElement(Btn, {
+    onClick: openAdd
+  }, "+ New SOP")), dueToday.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: C.danger,
+      textTransform: "uppercase",
+      letterSpacing: ".05em",
+      marginBottom: 8
+    }
+  }, "🔴 Due today"), dueToday.map(t => /*#__PURE__*/React.createElement(Row, {
+    key: t.id,
+    tpl: t
+  }))), upcoming.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: C.warn,
+      textTransform: "uppercase",
+      letterSpacing: ".05em",
+      margin: "14px 0 8px"
+    }
+  }, "🟡 Upcoming this week"), upcoming.map(t => /*#__PURE__*/React.createElement(Row, {
+    key: t.id,
+    tpl: t
+  }))), oneOffs.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: C.muted,
+      textTransform: "uppercase",
+      letterSpacing: ".05em",
+      margin: "14px 0 8px"
+    }
+  }, "⚪ One-off procedures"), oneOffs.map(t => /*#__PURE__*/React.createElement(Row, {
+    key: t.id,
+    tpl: t
+  }))), active.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: "40px 0",
+      color: C.mutedLight,
+      fontSize: 13
+    }
+  }, "No SOPs set up yet.", isAdmin ? " Tap + New SOP to add one." : ""), showAdd && /*#__PURE__*/React.createElement(Modal, {
+    title: editTpl ? "Edit SOP" : "New SOP",
+    onClose: () => setShowAdd(false)
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Title",
+    required: true
+  }, /*#__PURE__*/React.createElement(FInput, {
+    value: nt.title,
+    onChange: v => setNt(p => ({
+      ...p,
+      title: v
+    })),
+    placeholder: "e.g. Opening checklist"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Category (optional)"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: nt.categoryId,
+    onChange: e => setNt(p => ({
+      ...p,
+      categoryId: e.target.value
+    })),
+    style: {
+      width: "100%",
+      padding: "9px 11px",
+      borderRadius: 8,
+      border: `1.5px solid ${C.border}`,
+      fontSize: 13,
+      color: C.text,
+      background: "#FAFBFD"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "None"), cats.map(c => /*#__PURE__*/React.createElement("option", {
+    key: c.id,
+    value: c.id
+  }, c.icon, " ", c.name)))), /*#__PURE__*/React.createElement(Field, {
+    label: "Frequency"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: nt.frequency,
+    onChange: e => setNt(p => ({
+      ...p,
+      frequency: e.target.value
+    })),
+    style: {
+      width: "100%",
+      padding: "9px 11px",
+      borderRadius: 8,
+      border: `1.5px solid ${C.border}`,
+      fontSize: 13,
+      color: C.text,
+      background: "#FAFBFD"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "daily"
+  }, "Daily"), /*#__PURE__*/React.createElement("option", {
+    value: "weekly"
+  }, "Weekly"), /*#__PURE__*/React.createElement("option", {
+    value: "monthly"
+  }, "Monthly"), /*#__PURE__*/React.createElement("option", {
+    value: "once"
+  }, "One-off"))), nt.frequency === "weekly" && /*#__PURE__*/React.createElement(Field, {
+    label: "Day of week"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: nt.dayOfWeek,
+    onChange: e => setNt(p => ({
+      ...p,
+      dayOfWeek: e.target.value
+    })),
+    style: {
+      width: "100%",
+      padding: "9px 11px",
+      borderRadius: 8,
+      border: `1.5px solid ${C.border}`,
+      fontSize: 13,
+      color: C.text,
+      background: "#FAFBFD"
+    }
+  }, SOP_DAYS.map((d, i) => /*#__PURE__*/React.createElement("option", {
+    key: i,
+    value: i
+  }, d)))), nt.frequency === "monthly" && /*#__PURE__*/React.createElement(Field, {
+    label: "Day of month"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: nt.dayOfMonth,
+    onChange: e => setNt(p => ({
+      ...p,
+      dayOfMonth: e.target.value
+    })),
+    style: {
+      width: "100%",
+      padding: "9px 11px",
+      borderRadius: 8,
+      border: `1.5px solid ${C.border}`,
+      fontSize: 13,
+      color: C.text,
+      background: "#FAFBFD"
+    }
+  }, Array.from({
+    length: 28
+  }, (_, i) => i + 1).map(d => /*#__PURE__*/React.createElement("option", {
+    key: d,
+    value: d
+  }, d)))), /*#__PURE__*/React.createElement(Field, {
+    label: "Steps",
+    required: true
+  }, nt.steps.map((s, i) => /*#__PURE__*/React.createElement("div", {
+    key: s.id,
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement(FInput, {
+    value: s.text,
+    onChange: v => setNt(p => ({
+      ...p,
+      steps: p.steps.map(x => x.id === s.id ? {
+        ...x,
+        text: v
+      } : x)
+    })),
+    placeholder: `Step ${i + 1}`
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setNt(p => ({
+      ...p,
+      steps: p.steps.filter(x => x.id !== s.id)
+    })),
+    style: {
+      color: C.danger,
+      fontSize: 16,
+      padding: "0 8px"
+    }
+  }, "×"))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setNt(p => ({
+      ...p,
+      steps: [...p.steps, {
+        id: uid(),
+        text: ""
+      }]
+    })),
+    style: {
+      fontSize: 12,
+      color: C.accent,
+      fontWeight: 600
+    }
+  }, "+ Add step")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      justifyContent: "space-between",
+      marginTop: 8
+    }
+  }, editTpl ? /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    size: "sm",
+    onClick: () => deactivateTemplate(editTpl.id)
+  }, "Deactivate") : /*#__PURE__*/React.createElement("span", null), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setShowAdd(false)
+  }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveTemplate
+  }, editTpl ? "Save changes" : "Create SOP")))), openRun && openTpl && /*#__PURE__*/React.createElement(Modal, {
+    title: openTpl.title,
+    onClose: () => {
+      setRunTplId(null);
+      setRunId(null);
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: C.muted,
+      marginBottom: 12
+    }
+  }, sopWhen(openTpl), " · started by ", openRun.startedBy), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, openTpl.steps.map(step => {
+    const st = openRun.stepStates.find(s => s.stepId === step.id) || {
+      done: false
+    };
+    return /*#__PURE__*/React.createElement("div", {
+      key: step.id,
+      onClick: () => toggleStep(openRun, step.id),
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 12px",
+        borderRadius: 9,
+        border: `1.5px solid ${st.done ? C.success + "40" : C.border}`,
+        background: st.done ? C.successLight : "#fff",
+        cursor: "pointer"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 22,
+        height: 22,
+        borderRadius: 6,
+        border: `2px solid ${st.done ? C.success : C.border}`,
+        background: st.done ? C.success : "transparent",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "#fff",
+        fontSize: 13,
+        flexShrink: 0
+      }
+    }, st.done ? "✓" : ""), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 13,
+        color: C.text,
+        textDecoration: st.done ? "line-through" : "none",
+        opacity: st.done ? .6 : 1
+      }
+    }, step.text), st.done && /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 10,
+        color: C.mutedLight,
+        marginTop: 1
+      }
+    }, st.doneBy, " · ", fmtTime(st.doneAt))));
+  })), openRun.status === "done" && /*#__PURE__*/React.createElement("p", {
+    style: {
+      marginTop: 14,
+      fontSize: 12,
+      fontWeight: 700,
+      color: C.success,
+      textAlign: "center"
+    }
+  }, "✅ Completed by ", openRun.completedBy)), historyTpl && /*#__PURE__*/React.createElement(Modal, {
+    title: historyTpl.title + " — history",
+    onClose: () => setHistoryTpl(null)
+  }, (() => {
+    const past = runs.filter(r => r.sopId === historyTpl.id).sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
+    if (past.length === 0) return /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 13,
+        color: C.mutedLight,
+        textAlign: "center",
+        padding: "20px 0"
+      }
+    }, "No runs yet.");
+    return past.map(r => /*#__PURE__*/React.createElement("div", {
+      key: r.id,
+      style: {
+        padding: "10px 0",
+        borderBottom: `1px solid ${C.border}`
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 13,
+        fontWeight: 700,
+        color: C.text
+      }
+    }, fmtDate(r.startedAt)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        fontWeight: 700,
+        color: r.status === "done" ? C.success : C.warn
+      }
+    }, r.status === "done" ? "✅ Done" : "⏳ Incomplete")), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        marginTop: 2
+      }
+    }, r.status === "done" ? `Completed by ${r.completedBy}` : `Started by ${r.startedBy}`, " · ", r.stepStates.filter(s => s.done).length, "/", r.stepStates.length, " steps")));
+  })()));
+}
+
+// ─────────────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────────────
 function App() {
@@ -6431,6 +7091,8 @@ function App() {
   const [sharedReqs, setSharedReqs] = useState([]);
   const [priceItems, setPriceItems] = useState([]);
   const [priceDocs, setPriceDocs] = useState([]);
+  const [sopTemplates, setSopTemplates] = useState([]);
+  const [sopRuns, setSopRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
   const [showUserMgmt, setShowUserMgmt] = useState(false);
@@ -6476,20 +7138,23 @@ function App() {
     setLoading(true);
     const sid = currentShop.id;
     async function load() {
-      const [c, ct, t, pi, pd] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/price-items"), sget(sid + "/price-docs")]);
+      const [c, ct, t, pi, pd, st, sr] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/price-items"), sget(sid + "/price-docs"), sget(sid + "/sop-templates"), sget(sid + "/sop-runs")]);
       setCustOrders(c || []);
       setCats(ct || INITIAL_CATS);
       setTasks(t || []);
       setPriceItems(pi || []);
       setPriceDocs(pd || []);
+      setSopTemplates(st || []);
+      setSopRuns(sr || []);
       setLoading(false);
     }
     load();
     const interval = setInterval(async () => {
-      const [c, ct, t] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2")]);
+      const [c, ct, t, sr] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/sop-runs")]);
       if (c) setCustOrders(c);
       if (ct) setCats(ct);
       if (t) setTasks(t);
+      if (sr) setSopRuns(sr);
     }, 5000);
     return () => clearInterval(interval);
   }, [user, currentShop]);
@@ -6543,8 +7208,15 @@ function App() {
     await sset(sid + "/reorder-cats", next);
   }
   async function saveTasks(next) {
+    const added = next.filter(t => !tasks.some(x => x.id === t.id));
     setTasks(next);
     await sset(sid + "/tasks-v2", next);
+    added.forEach(t => {
+      if (window.pushNotify) {
+        const tag = t.priority === "high" ? "🔴 HIGH — " : "";
+        window.pushNotify(`✅ New Task — ${t.title}`, `${tag}Assigned to ${t.assignedTo} by ${t.assignedBy}`);
+      }
+    });
   }
   async function saveSharedReqs(next) {
     const added = next.filter(r => !sharedReqs.some(s => s.id === r.id));
@@ -6564,6 +7236,24 @@ function App() {
   async function savePriceDocs(next) {
     setPriceDocs(next);
     await sset(sid + "/price-docs", next);
+  }
+  async function saveSopTemplates(next) {
+    setSopTemplates(next);
+    await sset(sid + "/sop-templates", next);
+  }
+  async function saveSopRuns(next) {
+    const justCompleted = next.filter(r => {
+      const prev = sopRuns.find(x => x.id === r.id);
+      return r.status === "done" && (!prev || prev.status !== "done");
+    });
+    setSopRuns(next);
+    await sset(sid + "/sop-runs", next);
+    justCompleted.forEach(r => {
+      if (window.pushNotify) {
+        const tpl = sopTemplates.find(t => t.id === r.sopId);
+        window.pushNotify(`🗓️ ${tpl ? tpl.title : "SOP"} completed`, `Done by ${r.completedBy || user}`);
+      }
+    });
   }
   function upsertOrder(order) {
     const isNew = !custOrders.some(o => o.id === order.id);
@@ -6647,7 +7337,8 @@ function App() {
     reorder: "Reorder List",
     tasks: "Tasks",
     shared: "Shared Space",
-    prices: "Price List"
+    prices: "Price List",
+    sops: "SOPs"
   };
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -6796,6 +7487,8 @@ function App() {
     cats: cats,
     tasks: tasks,
     priceItems: priceItems,
+    sopTemplates: sopTemplates,
+    sopRuns: sopRuns,
     setSection: setSection
   }), section === "orders" && /*#__PURE__*/React.createElement(CustomerOrdersScreen, {
     orders: custOrders,
@@ -6825,6 +7518,14 @@ function App() {
     user: user,
     onUpdateItems: savePriceItems,
     onUpdateDocs: savePriceDocs
+  }), section === "sops" && /*#__PURE__*/React.createElement(SOPsScreen, {
+    templates: sopTemplates,
+    runs: sopRuns,
+    cats: cats,
+    user: user,
+    isAdmin: isAdmin,
+    onUpdateTemplates: saveSopTemplates,
+    onUpdateRuns: saveSopRuns
   })), /*#__PURE__*/React.createElement(BottomNav, {
     section: section,
     setSection: setSection,
