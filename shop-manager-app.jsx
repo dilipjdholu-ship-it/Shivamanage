@@ -1023,12 +1023,12 @@ function OrderDetailModal({order,user,onUpdate,onDelete,onClose}){
 // CUSTOMER ORDERS SCREEN
 // ─────────────────────────────────────────────────────────────
 function CustomerOrdersScreen({orders,user,onUpdate,onAdd,onDelete}){
-  const [filter,setFilter]       = useState("all");
+  const [filter,setFilter]       = useState("new");
   const [showAdd,setShowAdd]     = useState(false);
   const [openOrder,setOpenOrder] = useState(null);
   const [editOrder,setEditOrder] = useState(null);
 
-  const filtered = orders.filter(o=> filter==="all" ? true : o.status===filter);
+  const filtered = orders.filter(o=>o.status===filter);
   const sorted   = [...filtered].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
 
   const statusCounts = {};
@@ -1058,8 +1058,8 @@ function CustomerOrdersScreen({orders,user,onUpdate,onAdd,onDelete}){
 
       {/* Status filter — horizontal scroll, compact chips */}
       <div style={{display:"flex",gap:5,overflowX:"auto",paddingBottom:4,marginBottom:12,WebkitOverflowScrolling:"touch"}}>
-        {[["all","All"],["new","🆕 New"],["processing","⚙️ Processing"],["ready","✅ Ready"],["delivered","📦 Done"],["cancelled","❌ Cancelled"]].map(([k,lbl])=>{
-          const count=k==="all"?orders.length:(statusCounts[k]||0);
+        {[["new","🆕 New"],["processing","⚙️ Processing"],["ready","✅ Ready"],["delivered","📦 Done"],["cancelled","❌ Cancelled"]].map(([k,lbl])=>{
+          const count=statusCounts[k]||0;
           return (
             <button key={k} onClick={()=>setFilter(k)} style={{padding:"5px 10px",borderRadius:999,fontSize:11,fontWeight:filter===k?700:500,color:filter===k?"#fff":C.muted,background:filter===k?C.navy:"#fff",border:`1.5px solid ${filter===k?C.navy:C.border}`,whiteSpace:"nowrap",flexShrink:0,display:"flex",alignItems:"center",gap:4}}>
               {lbl}{count>0&&<span style={{background:filter===k?"rgba(255,255,255,.25)":C.bg,borderRadius:999,fontSize:10,padding:"0 5px",lineHeight:"16px"}}>{count}</span>}
@@ -1071,7 +1071,7 @@ function CustomerOrdersScreen({orders,user,onUpdate,onAdd,onDelete}){
       {/* Order list */}
       {sorted.length===0?(
         <div style={{textAlign:"center",padding:"48px 0",color:C.mutedLight,fontSize:14}}>
-          {filter==="all"?"No orders yet. Add the first one above.":"No orders with this status."}
+          {orders.length===0?"No orders yet. Add the first one above.":"No orders with this status."}
         </div>
       ):(
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -1122,7 +1122,7 @@ function CustomerOrdersScreen({orders,user,onUpdate,onAdd,onDelete}){
 // REORDER SCREEN (embedded, shares storage with standalone app)
 // ─────────────────────────────────────────────────────────────
 function ReorderScreen({cats,user,onUpdateCats,showToast}){
-  const [filter,setFilter]       = useState("all");
+  const [filter,setFilter]       = useState("pending");
   const [selMode,setSelMode]     = useState(false);
   const [selIds,setSelIds]       = useState(new Set());
   const [showShare,setShowShare] = useState(false);
@@ -1134,8 +1134,7 @@ function ReorderScreen({cats,user,onUpdateCats,showToast}){
   const totalItems   = cats.reduce((s,c)=>s+c.items.length,0);
   const totalOrdered = cats.reduce((s,c)=>s+c.items.filter(i=>i.ordered).length,0);
 
-  const visibleCats = filter==="all" ? cats
-    : cats.map(c=>({...c,items:c.items.filter(i=>filter==="pending"?!i.ordered:i.ordered)})).filter(c=>c.items.length>0);
+  const visibleCats = cats.map(c=>({...c,items:c.items.filter(i=>filter==="pending"?!i.ordered:i.ordered)})).filter(c=>c.items.length>0);
 
   const allItems = cats.flatMap(c=>c.items);
   const itemsToShare = selIds.size>0 ? allItems.filter(i=>selIds.has(i.id)) : allItems.filter(i=>!i.ordered);
@@ -1202,7 +1201,7 @@ function ReorderScreen({cats,user,onUpdateCats,showToast}){
       {/* Filter */}
       {!selMode&&(
         <div style={{display:"flex",gap:1,background:C.surface,borderRadius:8,padding:3,marginBottom:12,border:`1px solid ${C.border}`}}>
-          {[["all","All"],["pending","Pending"],["ordered","Ordered"]].map(([k,lbl])=>(
+          {[["pending","Pending"],["ordered","Ordered"]].map(([k,lbl])=>(
             <button key={k} onClick={()=>setFilter(k)} style={{flex:1,padding:"6px",borderRadius:6,fontSize:12,fontWeight:filter===k?700:500,color:filter===k?"#fff":C.muted,background:filter===k?C.navy:"transparent",border:"none"}}>{lbl}</button>
           ))}
         </div>
@@ -1260,6 +1259,7 @@ function ReorderScreen({cats,user,onUpdateCats,showToast}){
                         </div>
                         {/* Show item note */}
                         {item.note&&!item.ordered&&<p style={{fontSize:11,color:C.muted,marginTop:2}}>📝 {item.note}</p>}
+                        {item.requestedBy&&!item.ordered&&<p style={{fontSize:10,color:C.mutedLight,marginTop:2}}>Requested by {item.requestedBy}</p>}
                         {item.ordered&&(
                           <div style={{marginTop:3,display:"flex",gap:5,flexWrap:"wrap"}}>
                             <span style={{fontSize:11,color:C.success,fontWeight:600}}>✓ by {item.orderedBy}</span>
@@ -1286,7 +1286,7 @@ function ReorderScreen({cats,user,onUpdateCats,showToast}){
               {/* Add item button */}
               {!selMode&&(
                 <div style={{borderTop:`1px solid #F1F5F9`,display:"flex"}}>
-                  <ReorderAddItem cat={cat} onAdd={item=>onUpdateCats(cats.map(c=>c.id===cat.id?{...c,items:[...c.items,item]}:c))}/>
+                  <ReorderAddItem cat={cat} user={user} onAdd={item=>onUpdateCats(cats.map(c=>c.id===cat.id?{...c,items:[...c.items,item]}:c))}/>
                   <button onClick={()=>deleteCat(cat.id)} style={{padding:"9px 13px",fontSize:11,color:C.mutedLight}}>Delete</button>
                 </div>
               )}
@@ -1370,7 +1370,7 @@ function ReorderItemPanel({item,color,user,onConfirm,onCancel}){
   );
 }
 
-function ReorderAddItem({cat,onAdd}){
+function ReorderAddItem({cat,user,onAdd}){
   const [adding,setAdding]=useState(false);
   const [name,setName]=useState("");
   const [qty,setQty]=useState("");
@@ -1379,7 +1379,7 @@ function ReorderAddItem({cat,onAdd}){
 
   function add(){
     if(!name.trim()) return;
-    onAdd({id:uid(),name:name.trim(),note:note.trim(),defaultSupplier:"",reqQty:qty?parseInt(qty):null,reqUnit:unit,sortOrder:cat.items.length,ordered:false,orderedBy:null,orderedAt:null,orderNote:null,orderQty:null,orderSupplier:null,orderDueDate:null});
+    onAdd({id:uid(),name:name.trim(),note:note.trim(),defaultSupplier:"",reqQty:qty?parseInt(qty):null,reqUnit:unit,requestedBy:user,requestedAt:new Date().toISOString(),sortOrder:cat.items.length,ordered:false,orderedBy:null,orderedAt:null,orderNote:null,orderQty:null,orderSupplier:null,orderDueDate:null});
     setName(""); setQty(""); setUnit("pcs"); setNote(""); setAdding(false);
   }
 
@@ -1437,11 +1437,11 @@ function TasksScreen({tasks,user,shopUsers,onUpdateTasks}){
   const staffList = shopUsers.map(u=>u.displayName);
   const [showAdd,setShowAdd]   = useState(false);
   const [openTask,setOpenTask] = useState(null);
-  const [filter,setFilter]     = useState("all");
+  const [filter,setFilter]     = useState("open");
   const [nt,setNt]             = useState({title:"",assignedTo:staffList[0]||"",priority:"normal"});
   const [comment,setComment]   = useState("");
 
-  const visible=tasks.filter(t=>filter==="all"||t.status===filter);
+  const visible=tasks.filter(t=>t.status===filter);
   const sorted=[...visible].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
 
   function addTask(){
@@ -1479,7 +1479,7 @@ function TasksScreen({tasks,user,shopUsers,onUpdateTasks}){
       </div>
 
       <div style={{display:"flex",gap:1,background:C.surface,borderRadius:8,padding:3,marginBottom:12,border:`1px solid ${C.border}`}}>
-        {[["all","All"],["open","Open"],["in-progress","In Progress"],["done","Done"]].map(([k,lbl])=>(
+        {[["open","Open"],["in-progress","In Progress"],["done","Done"]].map(([k,lbl])=>(
           <button key={k} onClick={()=>setFilter(k)} style={{flex:1,padding:"6px 4px",borderRadius:6,fontSize:11,fontWeight:filter===k?700:500,color:filter===k?"#fff":C.muted,background:filter===k?C.navy:"transparent",border:"none"}}>{lbl}</button>
         ))}
       </div>
@@ -1816,12 +1816,11 @@ function SharedRequestDetail({req,currentShop,user,onUpdate,onDelete,onClose}){
 function SharedSpaceScreen({currentShop,allShops,user,sharedReqs,onUpdate}){
   const [showAdd,setShowAdd]   = useState(false);
   const [openReq,setOpenReq]   = useState(null);
-  const [filter,setFilter]     = useState("all");
+  const [filter,setFilter]     = useState("incoming");
 
   const otherShops=allShops.filter(s=>s.id!==currentShop.id);
   const filtered=sharedReqs.filter(r=>
-    filter==="incoming"?r.toShop.id===currentShop.id:
-    filter==="outgoing"?r.fromShop.id===currentShop.id:true
+    filter==="incoming"?r.toShop.id===currentShop.id:r.fromShop.id===currentShop.id
   );
   const sorted=[...filtered].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
   const pendingIncoming=sharedReqs.filter(r=>r.toShop.id===currentShop.id&&r.status==="pending").length;
@@ -1829,7 +1828,6 @@ function SharedSpaceScreen({currentShop,allShops,user,sharedReqs,onUpdate}){
   // Dynamic filter labels based on shop names
   const otherName = otherShops.length===1 ? otherShops[0].name : "Other Shops";
   const filterTabs=[
-    ["all",       "All"],
     ["incoming",  `By ${otherName}`],
     ["outgoing",  `By ${currentShop.name}`],
   ];
