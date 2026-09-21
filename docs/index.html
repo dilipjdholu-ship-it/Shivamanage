@@ -460,6 +460,39 @@ async function compressImage(file) {
     reader.readAsDataURL(file);
   });
 }
+// Sharper/larger than compressImage — for product photos (e.g. tile designs)
+// meant to look good shared to WhatsApp, not just as a reference thumbnail.
+async function compressTilePhoto(file) {
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 1600;
+        let {
+          width: w,
+          height: h
+        } = img;
+        if (w > MAX || h > MAX) {
+          if (w > h) {
+            h = Math.round(h / w * MAX);
+            w = MAX;
+          } else {
+            w = Math.round(w / h * MAX);
+            h = MAX;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 function initials(n) {
   return (n || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
 }
@@ -2023,6 +2056,8 @@ function DashboardScreen({
   priceItems,
   sopTemplates,
   sopRuns,
+  tileDesigns,
+  tileMovements,
   setSection
 }) {
   const day = new Date().toLocaleDateString("en-IN", {
@@ -2042,6 +2077,11 @@ function DashboardScreen({
     const pk = sopPeriodKey(t, today);
     const run = (sopRuns || []).find(r => r.sopId === t.id && r.periodKey === pk);
     return !run || run.status !== "done";
+  }).length;
+  const activeTileDesigns = (tileDesigns || []).filter(d => d.active !== false);
+  const outOfStockTiles = activeTileDesigns.filter(d => {
+    const bal = (tileMovements || []).filter(m => m.designId === d.id).reduce((s, m) => s + (m.type === "in" ? m.qty : -m.qty), 0);
+    return bal <= 0;
   }).length;
   const cards = [{
     id: "orders",
@@ -2079,6 +2119,15 @@ function DashboardScreen({
     color: "#BE185D",
     bg: "#FDF2F8",
     urgent: sopDueCount > 0
+  }, {
+    id: "tiles",
+    icon: "🧱",
+    title: "Tile Stock",
+    stat: `${activeTileDesigns.length} designs`,
+    sub: outOfStockTiles > 0 ? `⚠️ ${outOfStockTiles} out of stock` : "Stock levels OK",
+    color: "#0D9488",
+    bg: "#F0FDFA",
+    urgent: outOfStockTiles > 0
   }, {
     id: "prices",
     icon: "💰",
@@ -2872,6 +2921,7 @@ function OrderDetailModal({
   user,
   onUpdate,
   onDelete,
+  onEdit,
   onClose
 }) {
   const [comment, setComment] = useState("");
@@ -2974,7 +3024,18 @@ function OrderDetailModal({
       color: C.muted,
       marginTop: 4
     }
-  }, "Taken by ", order.takenBy, " · ", fmtTime(order.createdAt)))), (order.photos || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Taken by ", order.takenBy, " · ", fmtTime(order.createdAt))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onEdit(order),
+    style: {
+      fontSize: 12,
+      color: C.accent,
+      fontWeight: 600,
+      padding: "6px 10px",
+      borderRadius: 7,
+      border: `1px solid ${C.accent}30`,
+      flexShrink: 0
+    }
+  }, "✏️ Edit")), (order.photos || []).length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 14
     }
@@ -3530,6 +3591,10 @@ function CustomerOrdersScreen({
     user: user,
     onUpdate: handleUpdate,
     onDelete: onDelete,
+    onEdit: o => {
+      setOpenOrder(null);
+      setEditOrder(o);
+    },
     onClose: () => setOpenOrder(null)
   }));
 }
@@ -7370,6 +7435,792 @@ function SOPsScreen({
 }
 
 // ─────────────────────────────────────────────────────────────
+// TILE STOCK SCREEN
+// ─────────────────────────────────────────────────────────────
+const TILE_UNITS = ["Boxes", "Sq.ft", "Pieces"];
+function TileStockScreen({
+  designs,
+  movements,
+  tileCats,
+  user,
+  isAdmin,
+  onUpdateDesigns,
+  onUpdateMovements,
+  onUpdateTileCats
+}) {
+  function blankDesign() {
+    return {
+      code: "",
+      categoryId: "",
+      size: "",
+      unit: "Boxes",
+      sellingPrice: "",
+      purchaseRate: "",
+      photo: ""
+    };
+  }
+  const [showAdd, setShowAdd] = useState(false);
+  const [editDesign, setEditDesign] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [showCats, setShowCats] = useState(false);
+  const [newCat, setNewCat] = useState({
+    name: "",
+    icon: "🧱",
+    color: CAT_COLORS[0]
+  });
+  const [nd, setNd] = useState(blankDesign());
+  const [uploading, setUploading] = useState(false);
+  const [moveType, setMoveType] = useState(null);
+  const [moveQty, setMoveQty] = useState("");
+  const [moveNote, setMoveNote] = useState("");
+  const photoRef = useRef(null);
+  const active = (designs || []).filter(d => d.active !== false);
+  const openDesign = openId ? designs.find(d => d.id === openId) : null;
+  function catFor(d) {
+    return tileCats.find(c => c.id === d.categoryId);
+  }
+  function balanceFor(id) {
+    return movements.filter(m => m.designId === id).reduce((s, m) => s + (m.type === "in" ? m.qty : -m.qty), 0);
+  }
+  function addCategory() {
+    if (!newCat.name.trim()) return;
+    onUpdateTileCats([...tileCats, {
+      id: uid(),
+      name: newCat.name.trim(),
+      icon: newCat.icon.trim() || "🧱",
+      color: newCat.color
+    }]);
+    setNewCat({
+      name: "",
+      icon: "🧱",
+      color: CAT_COLORS[0]
+    });
+  }
+  function deleteCategory(id) {
+    onUpdateTileCats(tileCats.filter(c => c.id !== id));
+    if (designs.some(d => d.categoryId === id)) onUpdateDesigns(designs.map(d => d.categoryId === id ? {
+      ...d,
+      categoryId: null
+    } : d));
+  }
+  async function handlePhoto(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    const compressed = await compressTilePhoto(file);
+    setNd(p => ({
+      ...p,
+      photo: compressed
+    }));
+    setUploading(false);
+    e.target.value = "";
+  }
+  function openAdd() {
+    setEditDesign(null);
+    setNd(blankDesign());
+    setShowAdd(true);
+  }
+  function openEdit(d) {
+    setEditDesign(d);
+    setNd({
+      code: d.code,
+      categoryId: d.categoryId || "",
+      size: d.size || "",
+      unit: d.unit || "Boxes",
+      sellingPrice: d.sellingPrice ?? "",
+      purchaseRate: isAdmin ? d.purchaseRate ?? "" : "",
+      photo: d.photo || ""
+    });
+    setShowAdd(true);
+  }
+  function saveDesign() {
+    if (!nd.code.trim()) return;
+    const design = {
+      id: editDesign?.id || uid(),
+      code: nd.code.trim(),
+      categoryId: nd.categoryId || null,
+      size: nd.size.trim(),
+      unit: nd.unit,
+      sellingPrice: nd.sellingPrice ? parseFloat(nd.sellingPrice) : null,
+      // Staff never see purchaseRate, so never let their save wipe an admin-set value.
+      purchaseRate: isAdmin ? nd.purchaseRate ? parseFloat(nd.purchaseRate) : null : editDesign?.purchaseRate ?? null,
+      photo: nd.photo || "",
+      active: true,
+      addedBy: editDesign?.addedBy || user,
+      createdAt: editDesign?.createdAt || new Date().toISOString()
+    };
+    if (editDesign) onUpdateDesigns(designs.map(d => d.id === editDesign.id ? design : d));else onUpdateDesigns([design, ...designs]);
+    setShowAdd(false);
+    setEditDesign(null);
+  }
+  function deactivateDesign(id) {
+    onUpdateDesigns(designs.map(d => d.id === id ? {
+      ...d,
+      active: false
+    } : d));
+    setShowAdd(false);
+  }
+  function logMovement() {
+    const q = parseFloat(moveQty);
+    if (!q || q <= 0 || !openId) return;
+    const m = {
+      id: uid(),
+      designId: openId,
+      type: moveType,
+      qty: q,
+      note: moveNote.trim(),
+      by: user,
+      at: new Date().toISOString()
+    };
+    onUpdateMovements([m, ...movements]);
+    setMoveType(null);
+    setMoveQty("");
+    setMoveNote("");
+  }
+  async function shareDesign(d) {
+    const cat = catFor(d);
+    const parts = [d.code];
+    if (cat) parts.push(cat.name);
+    if (d.size) parts.push(d.size);
+    if (d.sellingPrice) parts.push(`₹${d.sellingPrice}`);
+    const text = parts.join(" · ");
+    try {
+      if (d.photo && navigator.canShare) {
+        const blob = await (await fetch(d.photo)).blob();
+        const file = new File([blob], `tile-${d.code}.jpg`, {
+          type: "image/jpeg"
+        });
+        if (navigator.canShare({
+          files: [file]
+        })) {
+          await navigator.share({
+            files: [file],
+            text
+          });
+          return;
+        }
+      }
+      if (navigator.share) {
+        await navigator.share({
+          text
+        });
+        return;
+      }
+    } catch (e) {}
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "14px 12px 8px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      fontFamily: F.display,
+      fontWeight: 700,
+      fontSize: 18,
+      color: C.text
+    }
+  }, "Tile Stock"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: C.muted,
+      marginTop: 1
+    }
+  }, active.length, " designs")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => setShowCats(true)
+  }, "🏷️ Categories"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: openAdd
+  }, "+ Add design"))), active.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: "40px 0",
+      color: C.mutedLight,
+      fontSize: 13
+    }
+  }, "No tile designs yet. Tap + Add design to start."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, active.map(d => {
+    const cat = catFor(d);
+    const bal = balanceFor(d.id);
+    return /*#__PURE__*/React.createElement("div", {
+      key: d.id,
+      onClick: () => setOpenId(d.id),
+      style: {
+        background: C.surface,
+        borderRadius: 10,
+        padding: "10px 12px",
+        border: `1.5px solid ${C.border}`,
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        cursor: "pointer"
+      }
+    }, d.photo ? /*#__PURE__*/React.createElement("img", {
+      src: d.photo,
+      alt: "",
+      style: {
+        width: 44,
+        height: 44,
+        borderRadius: 9,
+        objectFit: "cover",
+        flexShrink: 0
+      }
+    }) : /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 44,
+        height: 44,
+        borderRadius: 9,
+        background: cat ? cat.color + "20" : "#F1F5F9",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontSize: 19,
+        flexShrink: 0
+      }
+    }, cat ? cat.icon : "🧱"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontFamily: F.display,
+        fontWeight: 700,
+        fontSize: 14,
+        color: C.text,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, d.code), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        marginTop: 2
+      }
+    }, cat ? cat.name : "Uncategorized", d.size ? " · " + d.size : "")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        textAlign: "right",
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 14,
+        fontWeight: 700,
+        color: bal <= 0 ? C.danger : C.text
+      }
+    }, bal, " ", d.unit), d.sellingPrice && /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 11,
+        color: C.muted
+      }
+    }, fmtINR(d.sellingPrice))));
+  })), showAdd && /*#__PURE__*/React.createElement(Modal, {
+    title: editDesign ? "Edit Design" : "New Tile Design",
+    onClose: () => setShowAdd(false)
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Code",
+    required: true
+  }, /*#__PURE__*/React.createElement(FInput, {
+    value: nd.code,
+    onChange: v => setNd(p => ({
+      ...p,
+      code: v
+    })),
+    placeholder: "e.g. GVT-4521"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Category"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: nd.categoryId,
+    onChange: e => setNd(p => ({
+      ...p,
+      categoryId: e.target.value
+    })),
+    style: {
+      width: "100%",
+      padding: "9px 11px",
+      borderRadius: 8,
+      border: `1.5px solid ${C.border}`,
+      fontSize: 13,
+      color: C.text,
+      background: "#FAFBFD"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "None"), tileCats.map(c => /*#__PURE__*/React.createElement("option", {
+    key: c.id,
+    value: c.id
+  }, c.icon, " ", c.name)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Size"
+  }, /*#__PURE__*/React.createElement(FInput, {
+    value: nd.size,
+    onChange: v => setNd(p => ({
+      ...p,
+      size: v
+    })),
+    placeholder: "e.g. 2x2 ft"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Unit"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: nd.unit,
+    onChange: e => setNd(p => ({
+      ...p,
+      unit: e.target.value
+    })),
+    style: {
+      width: "100%",
+      padding: "9px 11px",
+      borderRadius: 8,
+      border: `1.5px solid ${C.border}`,
+      fontSize: 13,
+      color: C.text,
+      background: "#FAFBFD"
+    }
+  }, TILE_UNITS.map(u => /*#__PURE__*/React.createElement("option", {
+    key: u,
+    value: u
+  }, u))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: isAdmin ? "1fr 1fr" : "1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Selling price (₹)"
+  }, /*#__PURE__*/React.createElement(FInput, {
+    type: "number",
+    value: nd.sellingPrice,
+    onChange: v => setNd(p => ({
+      ...p,
+      sellingPrice: v
+    })),
+    placeholder: "0"
+  })), isAdmin && /*#__PURE__*/React.createElement(Field, {
+    label: "Purchase rate (₹) — admin only"
+  }, /*#__PURE__*/React.createElement(FInput, {
+    type: "number",
+    value: nd.purchaseRate,
+    onChange: v => setNd(p => ({
+      ...p,
+      purchaseRate: v
+    })),
+    placeholder: "0"
+  }))), /*#__PURE__*/React.createElement(Field, {
+    label: "Photo (optional)"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center"
+    }
+  }, nd.photo && /*#__PURE__*/React.createElement("img", {
+    src: nd.photo,
+    alt: "",
+    style: {
+      width: 60,
+      height: 60,
+      borderRadius: 9,
+      objectFit: "cover"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => photoRef.current?.click(),
+    style: {
+      padding: "8px 12px",
+      borderRadius: 8,
+      border: `1.5px dashed ${C.border}`,
+      fontSize: 12,
+      color: C.muted,
+      fontWeight: 600
+    }
+  }, uploading ? "⏳ Uploading..." : nd.photo ? "Change photo" : "📷 Add photo"), /*#__PURE__*/React.createElement("input", {
+    ref: photoRef,
+    type: "file",
+    accept: "image/*",
+    onChange: handlePhoto,
+    style: {
+      display: "none"
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      justifyContent: "space-between",
+      marginTop: 8
+    }
+  }, editDesign ? /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    size: "sm",
+    onClick: () => deactivateDesign(editDesign.id)
+  }, "Deactivate") : /*#__PURE__*/React.createElement("span", null), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setShowAdd(false)
+  }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveDesign,
+    disabled: !nd.code.trim()
+  }, editDesign ? "Save changes" : "Add design")))), showCats && /*#__PURE__*/React.createElement(Modal, {
+    title: "Tile Categories",
+    onClose: () => setShowCats(false)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      marginBottom: 16
+    }
+  }, tileCats.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: C.mutedLight,
+      textAlign: "center",
+      padding: "12px 0"
+    }
+  }, "No categories yet."), tileCats.map(c => /*#__PURE__*/React.createElement("div", {
+    key: c.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "8px 10px",
+      borderRadius: 9,
+      border: `1.5px solid ${C.border}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 30,
+      height: 30,
+      borderRadius: 8,
+      background: c.color + "20",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 15,
+      flexShrink: 0
+    }
+  }, c.icon), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      fontSize: 13,
+      fontWeight: 600,
+      color: C.text
+    }
+  }, c.name), /*#__PURE__*/React.createElement("button", {
+    onClick: () => deleteCategory(c.id),
+    style: {
+      color: C.danger,
+      fontSize: 16,
+      padding: "0 8px"
+    }
+  }, "×")))), /*#__PURE__*/React.createElement(Field, {
+    label: "Add a category"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement(FInput, {
+    value: newCat.icon,
+    onChange: v => setNewCat(p => ({
+      ...p,
+      icon: v
+    })),
+    style: {
+      width: 50,
+      textAlign: "center"
+    },
+    placeholder: "🏷️"
+  }), /*#__PURE__*/React.createElement(FInput, {
+    value: newCat.name,
+    onChange: v => setNewCat(p => ({
+      ...p,
+      name: v
+    })),
+    placeholder: "Category name"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      flexWrap: "wrap",
+      marginBottom: 10
+    }
+  }, CAT_COLORS.map(col => /*#__PURE__*/React.createElement("button", {
+    key: col,
+    onClick: () => setNewCat(p => ({
+      ...p,
+      color: col
+    })),
+    style: {
+      width: 24,
+      height: 24,
+      borderRadius: "50%",
+      background: col,
+      border: newCat.color === col ? `2.5px solid ${C.text}` : "2px solid transparent"
+    }
+  }))), /*#__PURE__*/React.createElement(Btn, {
+    onClick: addCategory,
+    disabled: !newCat.name.trim(),
+    size: "sm"
+  }, "+ Add category"))), openDesign && (() => {
+    const cat = catFor(openDesign);
+    const bal = balanceFor(openDesign.id);
+    const history = movements.filter(m => m.designId === openDesign.id).sort((a, b) => new Date(b.at) - new Date(a.at));
+    return /*#__PURE__*/React.createElement(Modal, {
+      title: openDesign.code,
+      onClose: () => {
+        setOpenId(null);
+        setMoveType(null);
+        setMoveQty("");
+        setMoveNote("");
+      },
+      fullHeight: true
+    }, openDesign.photo && /*#__PURE__*/React.createElement("img", {
+      src: openDesign.photo,
+      alt: "",
+      style: {
+        width: "100%",
+        maxHeight: 220,
+        objectFit: "cover",
+        borderRadius: 10,
+        marginBottom: 12
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 8,
+        marginBottom: 12
+      }
+    }, cat && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        fontWeight: 600,
+        color: cat.color,
+        background: cat.color + "15",
+        padding: "3px 9px",
+        borderRadius: 6
+      }
+    }, cat.icon, " ", cat.name), openDesign.size && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        background: C.bg,
+        padding: "3px 9px",
+        borderRadius: 6
+      }
+    }, openDesign.size), openDesign.sellingPrice && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        fontWeight: 600,
+        color: C.accent,
+        background: C.accentLight,
+        padding: "3px 9px",
+        borderRadius: 6
+      }
+    }, "Sell: ", fmtINR(openDesign.sellingPrice)), isAdmin && openDesign.purchaseRate && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        fontWeight: 600,
+        color: C.warn,
+        background: C.warnLight,
+        padding: "3px 9px",
+        borderRadius: 6
+      }
+    }, "Buy: ", fmtINR(openDesign.purchaseRate))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        textAlign: "center",
+        padding: "14px 0",
+        background: C.bg,
+        borderRadius: 10,
+        marginBottom: 12
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        textTransform: "uppercase",
+        letterSpacing: ".05em"
+      }
+    }, "Current balance"), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 26,
+        fontWeight: 800,
+        color: bal <= 0 ? C.danger : C.text,
+        fontFamily: F.display
+      }
+    }, bal, " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 14,
+        fontWeight: 600,
+        color: C.muted
+      }
+    }, openDesign.unit))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "success",
+      onClick: () => setMoveType(moveType === "in" ? null : "in"),
+      style: {
+        flex: 1
+      }
+    }, "+ Stock In"), /*#__PURE__*/React.createElement(Btn, {
+      variant: "danger",
+      onClick: () => setMoveType(moveType === "out" ? null : "out"),
+      style: {
+        flex: 1
+      }
+    }, "− Stock Out")), moveType && /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: "#FAFBFD",
+        border: `1.5px solid ${C.border}`,
+        borderRadius: 10,
+        padding: 12,
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 12,
+        fontWeight: 700,
+        color: moveType === "in" ? C.success : C.danger,
+        marginBottom: 8
+      }
+    }, moveType === "in" ? "Stock In" : "Stock Out"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 8
+      }
+    }, /*#__PURE__*/React.createElement(FInput, {
+      type: "number",
+      value: moveQty,
+      onChange: setMoveQty,
+      placeholder: `Qty (${openDesign.unit})`
+    })), /*#__PURE__*/React.createElement(FInput, {
+      value: moveNote,
+      onChange: setMoveNote,
+      placeholder: "Note (optional) e.g. supplier, invoice no."
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        justifyContent: "flex-end",
+        marginTop: 8
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      size: "sm",
+      onClick: () => {
+        setMoveType(null);
+        setMoveQty("");
+        setMoveNote("");
+      }
+    }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      onClick: logMovement,
+      disabled: !moveQty || parseFloat(moveQty) <= 0
+    }, "Log it"))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      size: "sm",
+      onClick: () => {
+        setOpenId(null);
+        openEdit(openDesign);
+      }
+    }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      size: "sm",
+      onClick: () => shareDesign(openDesign)
+    }, "📤 Share")), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 10,
+        fontWeight: 700,
+        color: C.muted,
+        textTransform: "uppercase",
+        letterSpacing: ".06em",
+        marginBottom: 8
+      }
+    }, "History (", history.length, ")"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 6
+      }
+    }, history.length === 0 && /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 13,
+        color: C.mutedLight,
+        textAlign: "center",
+        padding: "16px 0"
+      }
+    }, "No stock movements yet."), history.map(m => /*#__PURE__*/React.createElement("div", {
+      key: m.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "7px 10px",
+        background: C.bg,
+        borderRadius: 8
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 13
+      }
+    }, m.type === "in" ? "📥" : "📤"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 12,
+        fontWeight: 600,
+        color: C.text
+      }
+    }, m.type === "in" ? "+" : "−", m.qty, " ", openDesign.unit, m.note ? " · " + m.note : ""), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 10,
+        color: C.mutedLight
+      }
+    }, m.by, " · ", fmtTime(m.at)))))));
+  })());
+}
+
+// ─────────────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────────────
 function App() {
@@ -7388,6 +8239,9 @@ function App() {
   const [sopTemplates, setSopTemplates] = useState([]);
   const [sopRuns, setSopRuns] = useState([]);
   const [sopCats, setSopCats] = useState([]);
+  const [tileCats, setTileCats] = useState([]);
+  const [tileDesigns, setTileDesigns] = useState([]);
+  const [tileMovements, setTileMovements] = useState([]);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
   const [showUserMgmt, setShowUserMgmt] = useState(false);
@@ -7433,7 +8287,7 @@ function App() {
     setLoading(true);
     const sid = currentShop.id;
     async function load() {
-      const [c, ct, t, pi, pd, st, sr, sc] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/price-items"), sget(sid + "/price-docs"), sget(sid + "/sop-templates"), sget(sid + "/sop-runs"), sget(sid + "/sop-categories")]);
+      const [c, ct, t, pi, pd, st, sr, sc, tc, td, tm] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/price-items"), sget(sid + "/price-docs"), sget(sid + "/sop-templates"), sget(sid + "/sop-runs"), sget(sid + "/sop-categories"), sget(sid + "/tile-categories"), sget(sid + "/tile-designs"), sget(sid + "/tile-movements")]);
       setCustOrders(c || []);
       setCats(ct || INITIAL_CATS);
       setTasks(t || []);
@@ -7442,15 +8296,20 @@ function App() {
       setSopTemplates(st || []);
       setSopRuns(sr || []);
       setSopCats(sc || []);
+      setTileCats(tc || []);
+      setTileDesigns(td || []);
+      setTileMovements(tm || []);
       setLoading(false);
     }
     load();
     const interval = setInterval(async () => {
-      const [c, ct, t, sr] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/sop-runs")]);
+      const [c, ct, t, sr, td, tm] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/sop-runs"), sget(sid + "/tile-designs"), sget(sid + "/tile-movements")]);
       if (c) setCustOrders(c);
       if (ct) setCats(ct);
       if (t) setTasks(t);
       if (sr) setSopRuns(sr);
+      if (td) setTileDesigns(td);
+      if (tm) setTileMovements(tm);
     }, 5000);
     return () => clearInterval(interval);
   }, [user, currentShop]);
@@ -7541,6 +8400,18 @@ function App() {
     setSopCats(next);
     await sset(sid + "/sop-categories", next);
   }
+  async function saveTileCats(next) {
+    setTileCats(next);
+    await sset(sid + "/tile-categories", next);
+  }
+  async function saveTileDesigns(next) {
+    setTileDesigns(next);
+    await sset(sid + "/tile-designs", next);
+  }
+  async function saveTileMovements(next) {
+    setTileMovements(next);
+    await sset(sid + "/tile-movements", next);
+  }
   async function saveSopRuns(next) {
     const justCompleted = next.filter(r => {
       const prev = sopRuns.find(x => x.id === r.id);
@@ -7561,6 +8432,8 @@ function App() {
     if (isNew && window.pushNotify) {
       const items = order.items.slice(0, 2).map(i => i.name).join(", ") + (order.items.length > 2 ? ` +${order.items.length - 2} more` : "");
       window.pushNotify(`🛒 New Order — ${order.customerName}`, `${items} · added by ${user}`);
+    } else if (!isNew && window.pushNotify) {
+      window.pushNotify(`✏️ Order Updated — ${order.customerName}`, `Edited by ${user}`);
     }
   }
   function updateOrder(order) {
@@ -7638,7 +8511,8 @@ function App() {
     tasks: "Tasks",
     shared: "Shared Space",
     prices: "Price List",
-    sops: "SOPs"
+    sops: "SOPs",
+    tiles: "Tile Stock"
   };
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7789,6 +8663,8 @@ function App() {
     priceItems: priceItems,
     sopTemplates: sopTemplates,
     sopRuns: sopRuns,
+    tileDesigns: tileDesigns,
+    tileMovements: tileMovements,
     setSection: setSection
   }), section === "orders" && /*#__PURE__*/React.createElement(CustomerOrdersScreen, {
     orders: custOrders,
@@ -7828,6 +8704,15 @@ function App() {
     onUpdateTemplates: saveSopTemplates,
     onUpdateRuns: saveSopRuns,
     onUpdateSopCats: saveSopCats
+  }), section === "tiles" && /*#__PURE__*/React.createElement(TileStockScreen, {
+    designs: tileDesigns,
+    movements: tileMovements,
+    tileCats: tileCats,
+    user: user,
+    isAdmin: isAdmin,
+    onUpdateDesigns: saveTileDesigns,
+    onUpdateMovements: saveTileMovements,
+    onUpdateTileCats: saveTileCats
   })), /*#__PURE__*/React.createElement(BottomNav, {
     section: section,
     setSection: setSection,
