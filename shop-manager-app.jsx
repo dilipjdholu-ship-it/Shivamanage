@@ -97,6 +97,27 @@ async function compressImage(file){
     reader.readAsDataURL(file);
   });
 }
+// Sharper/larger than compressImage — for product photos (e.g. tile designs)
+// meant to look good shared to WhatsApp, not just as a reference thumbnail.
+async function compressTilePhoto(file){
+  return new Promise(resolve=>{
+    const reader=new FileReader();
+    reader.onload=e=>{
+      const img=new Image();
+      img.onload=()=>{
+        const MAX=1600;
+        let {width:w,height:h}=img;
+        if(w>MAX||h>MAX){ if(w>h){h=Math.round(h/w*MAX);w=MAX;}else{w=Math.round(w/h*MAX);h=MAX;} }
+        const canvas=document.createElement("canvas");
+        canvas.width=w; canvas.height=h;
+        canvas.getContext("2d").drawImage(img,0,0,w,h);
+        resolve(canvas.toDataURL("image/jpeg",0.85));
+      };
+      img.src=e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 function initials(n){ return (n||"?").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase(); }
 async function sget(k){
   try{
@@ -593,7 +614,7 @@ function BottomNav({section,setSection,badges}){
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD
 // ─────────────────────────────────────────────────────────────
-function DashboardScreen({user,custOrders,cats,tasks,priceItems,sopTemplates,sopRuns,setSection}){
+function DashboardScreen({user,custOrders,cats,tasks,priceItems,sopTemplates,sopRuns,tileDesigns,tileMovements,setSection}){
   const day = new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long"});
   const today = new Date();
 
@@ -611,11 +632,18 @@ function DashboardScreen({user,custOrders,cats,tasks,priceItems,sopTemplates,sop
     return !run||run.status!=="done";
   }).length;
 
+  const activeTileDesigns = (tileDesigns||[]).filter(d=>d.active!==false);
+  const outOfStockTiles = activeTileDesigns.filter(d=>{
+    const bal=(tileMovements||[]).filter(m=>m.designId===d.id).reduce((s,m)=>s+(m.type==="in"?m.qty:-m.qty),0);
+    return bal<=0;
+  }).length;
+
   const cards=[
     { id:"orders",  icon:"🛒", title:"Customer Orders", stat:pendingOrders>0?`${pendingOrders} active`:"All clear", sub:readyOrders>0?`${readyOrders} ready for pickup`:"No pending orders", color:C.accent,   bg:C.accentLight,  urgent:pendingOrders>0 },
     { id:"reorder", icon:"📋", title:"Reorder List",    stat:`${reorderItems} items`,           sub:lowStock>0?`⚠️ ${lowStock} below stock level`:"Stock levels OK", color:"#0891B2",  bg:"#E0F2FE",      urgent:lowStock>0  },
     { id:"tasks",   icon:"✅", title:"Tasks",           stat:openTasks>0?`${openTasks} open`:"All done", sub:"Tap to assign or update",           color:C.purple,  bg:C.purpleLight,  urgent:openTasks>0 },
     { id:"sops",    icon:"🗓️", title:"SOPs",            stat:sopDueCount>0?`${sopDueCount} due today`:"All caught up", sub:"Checklists & routines", color:"#BE185D", bg:"#FDF2F8",      urgent:sopDueCount>0 },
+    { id:"tiles",   icon:"🧱", title:"Tile Stock",      stat:`${activeTileDesigns.length} designs`, sub:outOfStockTiles>0?`⚠️ ${outOfStockTiles} out of stock`:"Stock levels OK", color:"#0D9488", bg:"#F0FDFA",      urgent:outOfStockTiles>0 },
     { id:"prices",  icon:"💰", title:"Price List",      stat:`${(priceItems||[]).length} items`, sub:"Search rates · share PDFs",               color:"#D97706",  bg:"#FFFBEB",      urgent:false },
   ];
 
@@ -862,7 +890,7 @@ function OrderFormModal({order,user,onSave,onClose}){
 // ─────────────────────────────────────────────────────────────
 // ORDER DETAIL MODAL
 // ─────────────────────────────────────────────────────────────
-function OrderDetailModal({order,user,onUpdate,onDelete,onClose}){
+function OrderDetailModal({order,user,onUpdate,onDelete,onEdit,onClose}){
   const [comment,setComment] = useState("");
   const bottomRef = useRef(null);
   useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:"smooth"}); },[order.comments]);
@@ -901,6 +929,7 @@ function OrderDetailModal({order,user,onUpdate,onDelete,onClose}){
           </div>
           <p style={{fontSize:11,color:C.muted,marginTop:4}}>Taken by {order.takenBy} · {fmtTime(order.createdAt)}</p>
         </div>
+        <button onClick={()=>onEdit(order)} style={{fontSize:12,color:C.accent,fontWeight:600,padding:"6px 10px",borderRadius:7,border:`1px solid ${C.accent}30`,flexShrink:0}}>✏️ Edit</button>
       </div>
 
       {/* Photos */}
@@ -1112,6 +1141,7 @@ function CustomerOrdersScreen({orders,user,onUpdate,onAdd,onDelete}){
           user={user}
           onUpdate={handleUpdate}
           onDelete={onDelete}
+          onEdit={o=>{ setOpenOrder(null); setEditOrder(o); }}
           onClose={()=>setOpenOrder(null)}/>
       )}
     </div>
@@ -2465,6 +2495,275 @@ function SOPsScreen({templates,runs,sopCats,shopUsers,user,isAdmin,onUpdateTempl
 }
 
 // ─────────────────────────────────────────────────────────────
+// TILE STOCK SCREEN
+// ─────────────────────────────────────────────────────────────
+const TILE_UNITS=["Boxes","Sq.ft","Pieces"];
+
+function TileStockScreen({designs,movements,tileCats,user,isAdmin,onUpdateDesigns,onUpdateMovements,onUpdateTileCats}){
+  function blankDesign(){ return {code:"",categoryId:"",size:"",unit:"Boxes",sellingPrice:"",purchaseRate:"",photo:""}; }
+
+  const [showAdd,setShowAdd]       = useState(false);
+  const [editDesign,setEditDesign] = useState(null);
+  const [openId,setOpenId]         = useState(null);
+  const [showCats,setShowCats]     = useState(false);
+  const [newCat,setNewCat]         = useState({name:"",icon:"🧱",color:CAT_COLORS[0]});
+  const [nd,setNd]                 = useState(blankDesign());
+  const [uploading,setUploading]   = useState(false);
+  const [moveType,setMoveType]     = useState(null);
+  const [moveQty,setMoveQty]       = useState("");
+  const [moveNote,setMoveNote]     = useState("");
+  const photoRef                   = useRef(null);
+
+  const active = (designs||[]).filter(d=>d.active!==false);
+  const openDesign = openId ? designs.find(d=>d.id===openId) : null;
+
+  function catFor(d){ return tileCats.find(c=>c.id===d.categoryId); }
+  function balanceFor(id){ return movements.filter(m=>m.designId===id).reduce((s,m)=>s+(m.type==="in"?m.qty:-m.qty),0); }
+
+  function addCategory(){
+    if(!newCat.name.trim()) return;
+    onUpdateTileCats([...tileCats,{id:uid(),name:newCat.name.trim(),icon:newCat.icon.trim()||"🧱",color:newCat.color}]);
+    setNewCat({name:"",icon:"🧱",color:CAT_COLORS[0]});
+  }
+  function deleteCategory(id){
+    onUpdateTileCats(tileCats.filter(c=>c.id!==id));
+    if(designs.some(d=>d.categoryId===id)) onUpdateDesigns(designs.map(d=>d.categoryId===id?{...d,categoryId:null}:d));
+  }
+
+  async function handlePhoto(e){
+    const file=e.target.files[0]; if(!file) return;
+    setUploading(true);
+    const compressed=await compressTilePhoto(file);
+    setNd(p=>({...p,photo:compressed}));
+    setUploading(false); e.target.value="";
+  }
+
+  function openAdd(){ setEditDesign(null); setNd(blankDesign()); setShowAdd(true); }
+  function openEdit(d){
+    setEditDesign(d);
+    setNd({code:d.code,categoryId:d.categoryId||"",size:d.size||"",unit:d.unit||"Boxes",
+      sellingPrice:d.sellingPrice??"",purchaseRate:isAdmin?(d.purchaseRate??""):"",photo:d.photo||""});
+    setShowAdd(true);
+  }
+
+  function saveDesign(){
+    if(!nd.code.trim()) return;
+    const design={
+      id:editDesign?.id||uid(), code:nd.code.trim(), categoryId:nd.categoryId||null,
+      size:nd.size.trim(), unit:nd.unit,
+      sellingPrice:nd.sellingPrice?parseFloat(nd.sellingPrice):null,
+      // Staff never see purchaseRate, so never let their save wipe an admin-set value.
+      purchaseRate: isAdmin ? (nd.purchaseRate?parseFloat(nd.purchaseRate):null) : (editDesign?.purchaseRate ?? null),
+      photo:nd.photo||"", active:true,
+      addedBy:editDesign?.addedBy||user, createdAt:editDesign?.createdAt||new Date().toISOString(),
+    };
+    if(editDesign) onUpdateDesigns(designs.map(d=>d.id===editDesign.id?design:d));
+    else onUpdateDesigns([design,...designs]);
+    setShowAdd(false); setEditDesign(null);
+  }
+  function deactivateDesign(id){ onUpdateDesigns(designs.map(d=>d.id===id?{...d,active:false}:d)); setShowAdd(false); }
+
+  function logMovement(){
+    const q=parseFloat(moveQty);
+    if(!q||q<=0||!openId) return;
+    const m={id:uid(),designId:openId,type:moveType,qty:q,note:moveNote.trim(),by:user,at:new Date().toISOString()};
+    onUpdateMovements([m,...movements]);
+    setMoveType(null); setMoveQty(""); setMoveNote("");
+  }
+
+  async function shareDesign(d){
+    const cat=catFor(d);
+    const parts=[d.code];
+    if(cat) parts.push(cat.name);
+    if(d.size) parts.push(d.size);
+    if(d.sellingPrice) parts.push(`₹${d.sellingPrice}`);
+    const text=parts.join(" · ");
+    try{
+      if(d.photo && navigator.canShare){
+        const blob=await (await fetch(d.photo)).blob();
+        const file=new File([blob],`tile-${d.code}.jpg`,{type:"image/jpeg"});
+        if(navigator.canShare({files:[file]})){ await navigator.share({files:[file],text}); return; }
+      }
+      if(navigator.share){ await navigator.share({text}); return; }
+    }catch(e){}
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`,"_blank");
+  }
+
+  return (
+    <div style={{padding:"14px 12px 8px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div>
+          <h2 style={{fontFamily:F.display,fontWeight:700,fontSize:18,color:C.text}}>Tile Stock</h2>
+          <p style={{fontSize:12,color:C.muted,marginTop:1}}>{active.length} designs</p>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <Btn variant="ghost" size="sm" onClick={()=>setShowCats(true)}>🏷️ Categories</Btn>
+          <Btn onClick={openAdd}>+ Add design</Btn>
+        </div>
+      </div>
+
+      {active.length===0&&<div style={{textAlign:"center",padding:"40px 0",color:C.mutedLight,fontSize:13}}>No tile designs yet. Tap + Add design to start.</div>}
+
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {active.map(d=>{
+          const cat=catFor(d);
+          const bal=balanceFor(d.id);
+          return (
+            <div key={d.id} onClick={()=>setOpenId(d.id)} style={{background:C.surface,borderRadius:10,padding:"10px 12px",border:`1.5px solid ${C.border}`,display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
+              {d.photo?
+                <img src={d.photo} alt="" style={{width:44,height:44,borderRadius:9,objectFit:"cover",flexShrink:0}}/>
+                :<div style={{width:44,height:44,borderRadius:9,background:cat?cat.color+"20":"#F1F5F9",display:"flex",alignItems:"center",justifyContent:"center",fontSize:19,flexShrink:0}}>{cat?cat.icon:"🧱"}</div>
+              }
+              <div style={{flex:1,minWidth:0}}>
+                <p style={{fontFamily:F.display,fontWeight:700,fontSize:14,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.code}</p>
+                <p style={{fontSize:11,color:C.muted,marginTop:2}}>{cat?cat.name:"Uncategorized"}{d.size?" · "+d.size:""}</p>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <p style={{fontSize:14,fontWeight:700,color:bal<=0?C.danger:C.text}}>{bal} {d.unit}</p>
+                {d.sellingPrice&&<p style={{fontSize:11,color:C.muted}}>{fmtINR(d.sellingPrice)}</p>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Add/Edit design modal */}
+      {showAdd&&(
+        <Modal title={editDesign?"Edit Design":"New Tile Design"} onClose={()=>setShowAdd(false)}>
+          <Field label="Code" required><FInput value={nd.code} onChange={v=>setNd(p=>({...p,code:v}))} placeholder="e.g. GVT-4521"/></Field>
+          <Field label="Category">
+            <select value={nd.categoryId} onChange={e=>setNd(p=>({...p,categoryId:e.target.value}))}
+              style={{width:"100%",padding:"9px 11px",borderRadius:8,border:`1.5px solid ${C.border}`,fontSize:13,color:C.text,background:"#FAFBFD"}}>
+              <option value="">None</option>
+              {tileCats.map(c=><option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
+            </select>
+          </Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <Field label="Size"><FInput value={nd.size} onChange={v=>setNd(p=>({...p,size:v}))} placeholder="e.g. 2x2 ft"/></Field>
+            <Field label="Unit">
+              <select value={nd.unit} onChange={e=>setNd(p=>({...p,unit:e.target.value}))}
+                style={{width:"100%",padding:"9px 11px",borderRadius:8,border:`1.5px solid ${C.border}`,fontSize:13,color:C.text,background:"#FAFBFD"}}>
+                {TILE_UNITS.map(u=><option key={u} value={u}>{u}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:isAdmin?"1fr 1fr":"1fr",gap:10}}>
+            <Field label="Selling price (₹)"><FInput type="number" value={nd.sellingPrice} onChange={v=>setNd(p=>({...p,sellingPrice:v}))} placeholder="0"/></Field>
+            {isAdmin&&<Field label="Purchase rate (₹) — admin only"><FInput type="number" value={nd.purchaseRate} onChange={v=>setNd(p=>({...p,purchaseRate:v}))} placeholder="0"/></Field>}
+          </div>
+          <Field label="Photo (optional)">
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              {nd.photo&&<img src={nd.photo} alt="" style={{width:60,height:60,borderRadius:9,objectFit:"cover"}}/>}
+              <button onClick={()=>photoRef.current?.click()} style={{padding:"8px 12px",borderRadius:8,border:`1.5px dashed ${C.border}`,fontSize:12,color:C.muted,fontWeight:600}}>
+                {uploading?"⏳ Uploading...":nd.photo?"Change photo":"📷 Add photo"}
+              </button>
+              <input ref={photoRef} type="file" accept="image/*" onChange={handlePhoto} style={{display:"none"}}/>
+            </div>
+          </Field>
+          <div style={{display:"flex",gap:8,justifyContent:"space-between",marginTop:8}}>
+            {editDesign?<Btn variant="danger" size="sm" onClick={()=>deactivateDesign(editDesign.id)}>Deactivate</Btn>:<span/>}
+            <div style={{display:"flex",gap:8}}>
+              <Btn variant="ghost" onClick={()=>setShowAdd(false)}>Cancel</Btn>
+              <Btn onClick={saveDesign} disabled={!nd.code.trim()}>{editDesign?"Save changes":"Add design"}</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Category manager modal */}
+      {showCats&&(
+        <Modal title="Tile Categories" onClose={()=>setShowCats(false)}>
+          <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+            {tileCats.length===0&&<p style={{fontSize:13,color:C.mutedLight,textAlign:"center",padding:"12px 0"}}>No categories yet.</p>}
+            {tileCats.map(c=>(
+              <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:9,border:`1.5px solid ${C.border}`}}>
+                <div style={{width:30,height:30,borderRadius:8,background:c.color+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{c.icon}</div>
+                <span style={{flex:1,fontSize:13,fontWeight:600,color:C.text}}>{c.name}</span>
+                <button onClick={()=>deleteCategory(c.id)} style={{color:C.danger,fontSize:16,padding:"0 8px"}}>×</button>
+              </div>
+            ))}
+          </div>
+          <Field label="Add a category">
+            <div style={{display:"flex",gap:6,marginBottom:8}}>
+              <FInput value={newCat.icon} onChange={v=>setNewCat(p=>({...p,icon:v}))} style={{width:50,textAlign:"center"}} placeholder="🏷️"/>
+              <FInput value={newCat.name} onChange={v=>setNewCat(p=>({...p,name:v}))} placeholder="Category name"/>
+            </div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+              {CAT_COLORS.map(col=>(
+                <button key={col} onClick={()=>setNewCat(p=>({...p,color:col}))}
+                  style={{width:24,height:24,borderRadius:"50%",background:col,border:newCat.color===col?`2.5px solid ${C.text}`:"2px solid transparent"}}/>
+              ))}
+            </div>
+            <Btn onClick={addCategory} disabled={!newCat.name.trim()} size="sm">+ Add category</Btn>
+          </Field>
+        </Modal>
+      )}
+
+      {/* Design detail modal */}
+      {openDesign&&(()=>{
+        const cat=catFor(openDesign);
+        const bal=balanceFor(openDesign.id);
+        const history=movements.filter(m=>m.designId===openDesign.id).sort((a,b)=>new Date(b.at)-new Date(a.at));
+        return (
+          <Modal title={openDesign.code} onClose={()=>{setOpenId(null);setMoveType(null);setMoveQty("");setMoveNote("");}} fullHeight>
+            {openDesign.photo&&<img src={openDesign.photo} alt="" style={{width:"100%",maxHeight:220,objectFit:"cover",borderRadius:10,marginBottom:12}}/>}
+            <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:12}}>
+              {cat&&<span style={{fontSize:11,fontWeight:600,color:cat.color,background:cat.color+"15",padding:"3px 9px",borderRadius:6}}>{cat.icon} {cat.name}</span>}
+              {openDesign.size&&<span style={{fontSize:11,color:C.muted,background:C.bg,padding:"3px 9px",borderRadius:6}}>{openDesign.size}</span>}
+              {openDesign.sellingPrice&&<span style={{fontSize:11,fontWeight:600,color:C.accent,background:C.accentLight,padding:"3px 9px",borderRadius:6}}>Sell: {fmtINR(openDesign.sellingPrice)}</span>}
+              {isAdmin&&openDesign.purchaseRate&&<span style={{fontSize:11,fontWeight:600,color:C.warn,background:C.warnLight,padding:"3px 9px",borderRadius:6}}>Buy: {fmtINR(openDesign.purchaseRate)}</span>}
+            </div>
+
+            <div style={{textAlign:"center",padding:"14px 0",background:C.bg,borderRadius:10,marginBottom:12}}>
+              <p style={{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:".05em"}}>Current balance</p>
+              <p style={{fontSize:26,fontWeight:800,color:bal<=0?C.danger:C.text,fontFamily:F.display}}>{bal} <span style={{fontSize:14,fontWeight:600,color:C.muted}}>{openDesign.unit}</span></p>
+            </div>
+
+            <div style={{display:"flex",gap:8,marginBottom:14}}>
+              <Btn variant="success" onClick={()=>setMoveType(moveType==="in"?null:"in")} style={{flex:1}}>+ Stock In</Btn>
+              <Btn variant="danger" onClick={()=>setMoveType(moveType==="out"?null:"out")} style={{flex:1}}>− Stock Out</Btn>
+            </div>
+
+            {moveType&&(
+              <div style={{background:"#FAFBFD",border:`1.5px solid ${C.border}`,borderRadius:10,padding:12,marginBottom:14}}>
+                <p style={{fontSize:12,fontWeight:700,color:moveType==="in"?C.success:C.danger,marginBottom:8}}>{moveType==="in"?"Stock In":"Stock Out"}</p>
+                <div style={{marginBottom:8}}>
+                  <FInput type="number" value={moveQty} onChange={setMoveQty} placeholder={`Qty (${openDesign.unit})`}/>
+                </div>
+                <FInput value={moveNote} onChange={setMoveNote} placeholder="Note (optional) e.g. supplier, invoice no."/>
+                <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}}>
+                  <Btn variant="ghost" size="sm" onClick={()=>{setMoveType(null);setMoveQty("");setMoveNote("");}}>Cancel</Btn>
+                  <Btn size="sm" onClick={logMovement} disabled={!moveQty||parseFloat(moveQty)<=0}>Log it</Btn>
+                </div>
+              </div>
+            )}
+
+            <div style={{display:"flex",gap:8,marginBottom:14}}>
+              <Btn variant="ghost" size="sm" onClick={()=>{setOpenId(null);openEdit(openDesign);}}>✏️ Edit</Btn>
+              <Btn variant="ghost" size="sm" onClick={()=>shareDesign(openDesign)}>📤 Share</Btn>
+            </div>
+
+            <p style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:".06em",marginBottom:8}}>History ({history.length})</p>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {history.length===0&&<p style={{fontSize:13,color:C.mutedLight,textAlign:"center",padding:"16px 0"}}>No stock movements yet.</p>}
+              {history.map(m=>(
+                <div key={m.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.bg,borderRadius:8}}>
+                  <span style={{fontSize:13}}>{m.type==="in"?"📥":"📤"}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{fontSize:12,fontWeight:600,color:C.text}}>{m.type==="in"?"+":"−"}{m.qty} {openDesign.unit}{m.note?" · "+m.note:""}</p>
+                    <p style={{fontSize:10,color:C.mutedLight}}>{m.by} · {fmtTime(m.at)}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Modal>
+        );
+      })()}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────────────
 export default function App(){
@@ -2483,6 +2782,9 @@ export default function App(){
   const [sopTemplates,setSopTemplates] = useState([]);
   const [sopRuns,setSopRuns]         = useState([]);
   const [sopCats,setSopCats]         = useState([]);
+  const [tileCats,setTileCats]         = useState([]);
+  const [tileDesigns,setTileDesigns]   = useState([]);
+  const [tileMovements,setTileMovements] = useState([]);
   const [loading,setLoading]         = useState(true);
   const [toast,setToast]             = useState(null);
   const [showUserMgmt,setShowUserMgmt] = useState(false);
@@ -2522,15 +2824,16 @@ export default function App(){
     setLoading(true);
     const sid=currentShop.id;
     async function load(){
-      const [c,ct,t,pi,pd,st,sr,sc]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/price-items"),sget(sid+"/price-docs"),sget(sid+"/sop-templates"),sget(sid+"/sop-runs"),sget(sid+"/sop-categories")]);
+      const [c,ct,t,pi,pd,st,sr,sc,tc,td,tm]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/price-items"),sget(sid+"/price-docs"),sget(sid+"/sop-templates"),sget(sid+"/sop-runs"),sget(sid+"/sop-categories"),sget(sid+"/tile-categories"),sget(sid+"/tile-designs"),sget(sid+"/tile-movements")]);
       setCustOrders(c||[]); setCats(ct||INITIAL_CATS); setTasks(t||[]); setPriceItems(pi||[]); setPriceDocs(pd||[]);
       setSopTemplates(st||[]); setSopRuns(sr||[]); setSopCats(sc||[]);
+      setTileCats(tc||[]); setTileDesigns(td||[]); setTileMovements(tm||[]);
       setLoading(false);
     }
     load();
     const interval=setInterval(async()=>{
-      const [c,ct,t,sr]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/sop-runs")]);
-      if(c) setCustOrders(c); if(ct) setCats(ct); if(t) setTasks(t); if(sr) setSopRuns(sr);
+      const [c,ct,t,sr,td,tm]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/sop-runs"),sget(sid+"/tile-designs"),sget(sid+"/tile-movements")]);
+      if(c) setCustOrders(c); if(ct) setCats(ct); if(t) setTasks(t); if(sr) setSopRuns(sr); if(td) setTileDesigns(td); if(tm) setTileMovements(tm);
     },5000);
     return()=>clearInterval(interval);
   },[user,currentShop]);
@@ -2586,6 +2889,9 @@ export default function App(){
   async function savePriceDocs(next){ setPriceDocs(next); await sset(sid+"/price-docs",next); }
   async function saveSopTemplates(next){ setSopTemplates(next); await sset(sid+"/sop-templates",next); }
   async function saveSopCats(next){ setSopCats(next); await sset(sid+"/sop-categories",next); }
+  async function saveTileCats(next){ setTileCats(next); await sset(sid+"/tile-categories",next); }
+  async function saveTileDesigns(next){ setTileDesigns(next); await sset(sid+"/tile-designs",next); }
+  async function saveTileMovements(next){ setTileMovements(next); await sset(sid+"/tile-movements",next); }
   async function saveSopRuns(next){
     const justCompleted=next.filter(r=>{
       const prev=sopRuns.find(x=>x.id===r.id);
@@ -2606,6 +2912,8 @@ export default function App(){
     if(isNew && window.pushNotify){
       const items=order.items.slice(0,2).map(i=>i.name).join(", ")+(order.items.length>2?` +${order.items.length-2} more`:"");
       window.pushNotify(`🛒 New Order — ${order.customerName}`,`${items} · added by ${user}`);
+    } else if(!isNew && window.pushNotify){
+      window.pushNotify(`✏️ Order Updated — ${order.customerName}`,`Edited by ${user}`);
     }
   }
   function updateOrder(order){
@@ -2658,7 +2966,7 @@ export default function App(){
 
   const isAdmin=currentUser.role==="admin";
   const multiShop=userShops.length>1;
-  const sectionTitle={dashboard:"",orders:"Customer Orders",reorder:"Reorder List",tasks:"Tasks",shared:"Shared Space",prices:"Price List",sops:"SOPs"};
+  const sectionTitle={dashboard:"",orders:"Customer Orders",reorder:"Reorder List",tasks:"Tasks",shared:"Shared Space",prices:"Price List",sops:"SOPs",tiles:"Tile Stock"};
 
   return (
     <div style={{minHeight:"100vh",minHeight:"100dvh",background:C.bg,paddingBottom:"calc(72px + env(safe-area-inset-bottom))"}}>
@@ -2710,13 +3018,14 @@ export default function App(){
 
       {/* Full-width content — each section fills screen edge to edge */}
       <div style={{width:"100%",background:C.bg,minHeight:"calc(100dvh - 50px - 72px)"}}>
-        {section==="dashboard"&&<DashboardScreen user={user} custOrders={custOrders} cats={cats} tasks={tasks} priceItems={priceItems} sopTemplates={sopTemplates} sopRuns={sopRuns} setSection={setSection}/>}
+        {section==="dashboard"&&<DashboardScreen user={user} custOrders={custOrders} cats={cats} tasks={tasks} priceItems={priceItems} sopTemplates={sopTemplates} sopRuns={sopRuns} tileDesigns={tileDesigns} tileMovements={tileMovements} setSection={setSection}/>}
         {section==="orders"&&<CustomerOrdersScreen orders={custOrders} user={user} onUpdate={updateOrder} onAdd={upsertOrder} onDelete={deleteOrder}/>}
         {section==="reorder"&&<ReorderScreen cats={cats} user={user} onUpdateCats={saveCats} showToast={setToast}/>}
         {section==="tasks"&&<TasksScreen tasks={tasks} user={user} shopUsers={shopUsers.filter(u=>(u.shops||[]).includes(currentShop.id)||u.role==="admin")} onUpdateTasks={saveTasks}/>}
         {section==="shared"&&<SharedSpaceScreen currentShop={currentShop} allShops={shopList} user={user} sharedReqs={sharedReqs} onUpdate={saveSharedReqs}/>}
         {section==="prices"&&<PriceListScreen priceItems={priceItems} priceDocs={priceDocs} user={user} onUpdateItems={savePriceItems} onUpdateDocs={savePriceDocs}/>}
         {section==="sops"&&<SOPsScreen templates={sopTemplates} runs={sopRuns} sopCats={sopCats} shopUsers={shopUsers.filter(u=>(u.shops||[]).includes(currentShop.id)||u.role==="admin")} user={user} isAdmin={isAdmin} onUpdateTemplates={saveSopTemplates} onUpdateRuns={saveSopRuns} onUpdateSopCats={saveSopCats}/>}
+        {section==="tiles"&&<TileStockScreen designs={tileDesigns} movements={tileMovements} tileCats={tileCats} user={user} isAdmin={isAdmin} onUpdateDesigns={saveTileDesigns} onUpdateMovements={saveTileMovements} onUpdateTileCats={saveTileCats}/>}
       </div>
 
       <BottomNav section={section} setSection={setSection} badges={badges}/>
