@@ -8395,6 +8395,43 @@ function AttendanceScreen({
     return attendance.find(a => a.staffName === staffName && a.date === dateKeyFor(d));
   }
   const staffList = isAdmin ? shopUsers.map(u => u.displayName) : [user];
+  function statsFor(staffName) {
+    let present = 0,
+      half = 0,
+      absent = 0,
+      mins = 0;
+    days.forEach(d => {
+      const rec = recordFor(staffName, d);
+      if (!rec) return;
+      if (rec.status === "present") present++;else if (rec.status === "half-day") half++;else if (rec.status === "absent") absent++;
+      if (rec.checkIn && rec.checkOut) mins += Math.round((new Date(rec.checkOut) - new Date(rec.checkIn)) / 60000);
+    });
+    return {
+      present,
+      half,
+      absent,
+      mins
+    };
+  }
+  function fmtHM(mins) {
+    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  }
+  async function shareReport() {
+    const lines = staffList.map(name => {
+      const s = statsFor(name);
+      return `${name}: ${s.present}P, ${s.half}H, ${s.absent}A, ${fmtHM(s.mins)}`;
+    });
+    const text = `Attendance — ${monthLabel}\n${lines.join("\n")}`;
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          text
+        });
+        return;
+      }
+    } catch (e) {}
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+  }
   function openCell(staffName, d) {
     const rec = recordFor(staffName, d);
     if (!isAdmin) {
@@ -8475,7 +8512,15 @@ function AttendanceScreen({
       padding: "4px 12px",
       color: C.muted
     }
-  }, "›")), /*#__PURE__*/React.createElement("div", {
+  }, "›")), isAdmin && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: shareReport
+  }, "📤 Share Report")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 14,
@@ -8510,72 +8555,101 @@ function AttendanceScreen({
       background: C.danger,
       marginRight: 4
     }
-  }), "Absent")), staffList.map(staffName => /*#__PURE__*/React.createElement("div", {
-    key: staffName,
-    style: {
-      marginBottom: 18
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      fontSize: 13,
-      fontWeight: 700,
-      color: C.text,
-      marginBottom: 6
-    }
-  }, staffName), /*#__PURE__*/React.createElement("div", {
-    style: {
-      overflowX: "auto",
-      display: "flex",
-      gap: 4,
-      paddingBottom: 4
-    }
-  }, days.map(d => {
-    const rec = recordFor(staffName, d);
-    const isToday = dateKeyFor(d) === todayKey;
-    let bg = "#F1F5F9",
-      color = C.mutedLight,
-      label = "";
-    if (rec) {
-      if (rec.status === "present") {
-        bg = C.success;
-        color = "#fff";
-        label = "P";
-      } else if (rec.status === "half-day") {
-        bg = C.warn;
-        color = "#fff";
-        label = "H";
-      } else if (rec.status === "absent") {
-        bg = C.danger;
-        color = "#fff";
-        label = "A";
-      }
-    }
-    return /*#__PURE__*/React.createElement("button", {
-      key: d,
-      onClick: () => openCell(staffName, d),
+  }), "Absent")), staffList.map(staffName => {
+    const stats = statsFor(staffName);
+    return /*#__PURE__*/React.createElement("div", {
+      key: staffName,
       style: {
-        minWidth: 30,
-        height: 36,
-        borderRadius: 7,
-        background: bg,
-        color,
-        fontSize: 10,
-        fontWeight: 700,
-        border: isToday ? `2px solid ${C.text}` : "none",
-        flexShrink: 0,
+        marginBottom: 18
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
         display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 1
+        justifyContent: "space-between",
+        alignItems: "baseline",
+        marginBottom: 6
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 13,
+        fontWeight: 700,
+        color: C.text
+      }
+    }, staffName), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 11,
+        color: C.muted
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: {
-        fontSize: 8,
-        opacity: .85
+        color: C.success,
+        fontWeight: 700
       }
-    }, d), /*#__PURE__*/React.createElement("span", null, label));
-  })))), editRec && /*#__PURE__*/React.createElement(Modal, {
+    }, stats.present, "P"), " · ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.warn,
+        fontWeight: 700
+      }
+    }, stats.half, "H"), " · ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.danger,
+        fontWeight: 700
+      }
+    }, stats.absent, "A"), " · ", fmtHM(stats.mins))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        overflowX: "auto",
+        display: "flex",
+        gap: 4,
+        paddingBottom: 4
+      }
+    }, days.map(d => {
+      const rec = recordFor(staffName, d);
+      const isToday = dateKeyFor(d) === todayKey;
+      let bg = "#F1F5F9",
+        color = C.mutedLight,
+        label = "";
+      if (rec) {
+        if (rec.status === "present") {
+          bg = C.success;
+          color = "#fff";
+          label = "P";
+        } else if (rec.status === "half-day") {
+          bg = C.warn;
+          color = "#fff";
+          label = "H";
+        } else if (rec.status === "absent") {
+          bg = C.danger;
+          color = "#fff";
+          label = "A";
+        }
+      }
+      return /*#__PURE__*/React.createElement("button", {
+        key: d,
+        onClick: () => openCell(staffName, d),
+        style: {
+          minWidth: 30,
+          height: 36,
+          borderRadius: 7,
+          background: bg,
+          color,
+          fontSize: 10,
+          fontWeight: 700,
+          border: isToday ? `2px solid ${C.text}` : "none",
+          flexShrink: 0,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 1
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontSize: 8,
+          opacity: .85
+        }
+      }, d), /*#__PURE__*/React.createElement("span", null, label));
+    })));
+  }), editRec && /*#__PURE__*/React.createElement(Modal, {
     title: `${editRec.staffName} — ${fmtDate(editRec.date)}`,
     onClose: () => setEditRec(null)
   }, /*#__PURE__*/React.createElement(Field, {
