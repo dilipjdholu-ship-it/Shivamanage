@@ -76,6 +76,7 @@ function fmtTime(iso){
   return d.toLocaleDateString("en-IN",{day:"numeric",month:"short"})+" · "+d.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"});
 }
 function fmtDate(iso){ if(!iso) return ""; return new Date(iso).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"}); }
+function fmtClockTime(iso){ if(!iso) return ""; return new Date(iso).toLocaleTimeString("en-IN",{hour:"numeric",minute:"2-digit"}); }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function fmtINR(n){ return "₹"+Number(n).toLocaleString("en-IN"); }
 async function compressImage(file){
@@ -614,7 +615,61 @@ function BottomNav({section,setSection,badges}){
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD
 // ─────────────────────────────────────────────────────────────
-function DashboardScreen({user,custOrders,cats,tasks,priceItems,sopTemplates,sopRuns,tileDesigns,tileMovements,setSection}){
+function getGPSLocation(){
+  return new Promise(resolve=>{
+    if(!navigator.geolocation){ resolve(null); return; }
+    const timer=setTimeout(()=>resolve(null),8000);
+    navigator.geolocation.getCurrentPosition(
+      pos=>{ clearTimeout(timer); resolve({lat:pos.coords.latitude,lng:pos.coords.longitude}); },
+      ()=>{ clearTimeout(timer); resolve(null); },
+      {timeout:7000}
+    );
+  });
+}
+function openMapLink(loc){ if(loc) window.open(`https://www.google.com/maps?q=${loc.lat},${loc.lng}`,"_blank"); }
+
+function AttendanceBanner({attendance,user,shopName,onUpdate,onOpen}){
+  const [busy,setBusy]=useState(false);
+  const today=ymd(new Date());
+  const rec=(attendance||[]).find(a=>a.staffName===user&&a.date===today);
+
+  async function checkIn(){
+    setBusy(true);
+    const loc=await getGPSLocation();
+    const newRec={id:uid(),staffName:user,date:today,checkIn:new Date().toISOString(),checkInLoc:loc,checkOut:null,checkOutLoc:null,status:"present"};
+    onUpdate([newRec,...attendance]);
+    setBusy(false);
+  }
+  async function checkOut(){
+    setBusy(true);
+    const loc=await getGPSLocation();
+    onUpdate(attendance.map(a=>a.id===rec.id?{...a,checkOut:new Date().toISOString(),checkOutLoc:loc}:a));
+    setBusy(false);
+  }
+
+  if(rec&&rec.checkOut){
+    const mins=Math.round((new Date(rec.checkOut)-new Date(rec.checkIn))/60000);
+    return (
+      <div onClick={onOpen} style={{background:C.successLight,border:`1.5px solid ${C.success}40`,borderRadius:12,padding:"12px 14px",marginBottom:16,cursor:"pointer"}}>
+        <p style={{fontSize:12,fontWeight:700,color:C.success}}>✅ Checked out at {fmtClockTime(rec.checkOut)}</p>
+        <p style={{fontSize:11,color:C.muted,marginTop:2}}>Worked {Math.floor(mins/60)}h {mins%60}m today · {shopName}</p>
+      </div>
+    );
+  }
+  return (
+    <div style={{background:C.surface,border:`1.5px solid ${C.border}`,borderRadius:12,padding:"12px 14px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+      <div onClick={onOpen} style={{cursor:"pointer",flex:1,minWidth:0}}>
+        <p style={{fontSize:12,fontWeight:700,color:C.text}}>{rec?`Checked in at ${fmtClockTime(rec.checkIn)}`:"Not checked in yet"}</p>
+        <p style={{fontSize:11,color:C.muted,marginTop:2}}>{shopName}</p>
+      </div>
+      <Btn size="sm" variant={rec?"danger":"success"} disabled={busy} onClick={rec?checkOut:checkIn}>
+        {busy?"...":rec?"Check Out":"Check In"}
+      </Btn>
+    </div>
+  );
+}
+
+function DashboardScreen({user,custOrders,cats,tasks,priceItems,sopTemplates,sopRuns,tileDesigns,tileMovements,attendance,shopName,onUpdateAttendance,setSection}){
   const day = new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long"});
   const today = new Date();
 
@@ -654,6 +709,8 @@ function DashboardScreen({user,custOrders,cats,tasks,priceItems,sopTemplates,sop
         <p style={{fontSize:12,color:C.muted,marginBottom:2}}>{day}</p>
         <h1 style={{fontFamily:F.display,fontWeight:700,fontSize:22,color:C.text}}>Good day, {user.split(" ")[0]} 👋</h1>
       </div>
+
+      <AttendanceBanner attendance={attendance} user={user} shopName={shopName} onUpdate={onUpdateAttendance} onOpen={()=>setSection("attendance")}/>
 
       {/* Nav cards */}
       <div style={{display:"grid",gridTemplateColumns:"1fr",gap:10,marginBottom:22}}>
@@ -2764,6 +2821,145 @@ function TileStockScreen({designs,movements,tileCats,user,isAdmin,onUpdateDesign
 }
 
 // ─────────────────────────────────────────────────────────────
+// ATTENDANCE SCREEN
+// ─────────────────────────────────────────────────────────────
+function AttendanceScreen({attendance,shopUsers,user,isAdmin,onUpdate}){
+  const [month,setMonth]   = useState(()=>{const d=new Date();return {y:d.getFullYear(),m:d.getMonth()};});
+  const [editRec,setEditRec] = useState(null);
+  const [viewRec,setViewRec] = useState(null);
+
+  const daysInMonth = new Date(month.y,month.m+1,0).getDate();
+  const days = Array.from({length:daysInMonth},(_,i)=>i+1);
+  const monthLabel = new Date(month.y,month.m,1).toLocaleDateString("en-IN",{month:"long",year:"numeric"});
+  const todayKey = ymd(new Date());
+
+  function dateKeyFor(d){ return ymd(new Date(month.y,month.m,d)); }
+  function recordFor(staffName,d){ return attendance.find(a=>a.staffName===staffName&&a.date===dateKeyFor(d)); }
+
+  const staffList = isAdmin ? shopUsers.map(u=>u.displayName) : [user];
+
+  function openCell(staffName,d){
+    const rec=recordFor(staffName,d);
+    if(!isAdmin){ if(rec) setViewRec(rec); return; }
+    setEditRec({
+      staffName, date:dateKeyFor(d),
+      status: rec?.status || "absent",
+      checkInTime: rec?.checkIn ? new Date(rec.checkIn).toTimeString().slice(0,5) : "",
+      checkOutTime: rec?.checkOut ? new Date(rec.checkOut).toTimeString().slice(0,5) : "",
+      existing: rec||null,
+    });
+  }
+
+  function saveRecord(){
+    const existing=editRec.existing;
+    const checkIn = editRec.checkInTime ? new Date(`${editRec.date}T${editRec.checkInTime}`).toISOString() : null;
+    const checkOut = editRec.checkOutTime ? new Date(`${editRec.date}T${editRec.checkOutTime}`).toISOString() : null;
+    const rec={
+      id:existing?.id||uid(), staffName:editRec.staffName, date:editRec.date,
+      checkIn, checkInLoc:existing?.checkInLoc||null,
+      checkOut, checkOutLoc:existing?.checkOutLoc||null,
+      status:editRec.status,
+    };
+    if(existing) onUpdate(attendance.map(a=>a.id===existing.id?rec:a));
+    else onUpdate([rec,...attendance]);
+    setEditRec(null);
+  }
+  function deleteRecord(){
+    if(editRec.existing) onUpdate(attendance.filter(a=>a.id!==editRec.existing.id));
+    setEditRec(null);
+  }
+
+  return (
+    <div style={{padding:"14px 12px 8px"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+        <button onClick={()=>setMonth(p=>{const d=new Date(p.y,p.m-1,1);return {y:d.getFullYear(),m:d.getMonth()};})} style={{fontSize:18,padding:"4px 12px",color:C.muted}}>‹</button>
+        <p style={{fontFamily:F.display,fontWeight:700,fontSize:15,color:C.text}}>{monthLabel}</p>
+        <button onClick={()=>setMonth(p=>{const d=new Date(p.y,p.m+1,1);return {y:d.getFullYear(),m:d.getMonth()};})} style={{fontSize:18,padding:"4px 12px",color:C.muted}}>›</button>
+      </div>
+
+      <div style={{display:"flex",gap:14,marginBottom:16,fontSize:11,color:C.muted}}>
+        <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.success,marginRight:4}}/>Present</span>
+        <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.warn,marginRight:4}}/>Half-day</span>
+        <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.danger,marginRight:4}}/>Absent</span>
+      </div>
+
+      {staffList.map(staffName=>(
+        <div key={staffName} style={{marginBottom:18}}>
+          <p style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:6}}>{staffName}</p>
+          <div style={{overflowX:"auto",display:"flex",gap:4,paddingBottom:4}}>
+            {days.map(d=>{
+              const rec=recordFor(staffName,d);
+              const isToday=dateKeyFor(d)===todayKey;
+              let bg="#F1F5F9", color=C.mutedLight, label="";
+              if(rec){
+                if(rec.status==="present"){bg=C.success;color="#fff";label="P";}
+                else if(rec.status==="half-day"){bg=C.warn;color="#fff";label="H";}
+                else if(rec.status==="absent"){bg=C.danger;color="#fff";label="A";}
+              }
+              return (
+                <button key={d} onClick={()=>openCell(staffName,d)}
+                  style={{minWidth:30,height:36,borderRadius:7,background:bg,color,fontSize:10,fontWeight:700,border:isToday?`2px solid ${C.text}`:"none",flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:1}}>
+                  <span style={{fontSize:8,opacity:.85}}>{d}</span>
+                  <span>{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      {/* Admin: add/edit a day's record */}
+      {editRec&&(
+        <Modal title={`${editRec.staffName} — ${fmtDate(editRec.date)}`} onClose={()=>setEditRec(null)}>
+          <Field label="Status">
+            <select value={editRec.status} onChange={e=>setEditRec(p=>({...p,status:e.target.value}))}
+              style={{width:"100%",padding:"9px 11px",borderRadius:8,border:`1.5px solid ${C.border}`,fontSize:13,color:C.text,background:"#FAFBFD"}}>
+              <option value="present">Present</option>
+              <option value="half-day">Half-day</option>
+              <option value="absent">Absent</option>
+            </select>
+          </Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <Field label="Check-in time"><FInput type="time" value={editRec.checkInTime} onChange={v=>setEditRec(p=>({...p,checkInTime:v}))}/></Field>
+            <Field label="Check-out time"><FInput type="time" value={editRec.checkOutTime} onChange={v=>setEditRec(p=>({...p,checkOutTime:v}))}/></Field>
+          </div>
+          {editRec.existing&&(editRec.existing.checkInLoc||editRec.existing.checkOutLoc)&&(
+            <div style={{display:"flex",gap:8,marginBottom:8}}>
+              {editRec.existing.checkInLoc&&<button onClick={()=>openMapLink(editRec.existing.checkInLoc)} style={{fontSize:11,color:C.accent,fontWeight:600}}>📍 Check-in location</button>}
+              {editRec.existing.checkOutLoc&&<button onClick={()=>openMapLink(editRec.existing.checkOutLoc)} style={{fontSize:11,color:C.accent,fontWeight:600}}>📍 Check-out location</button>}
+            </div>
+          )}
+          <div style={{display:"flex",gap:8,justifyContent:"space-between",marginTop:8}}>
+            {editRec.existing?<Btn variant="danger" size="sm" onClick={deleteRecord}>Delete</Btn>:<span/>}
+            <div style={{display:"flex",gap:8}}>
+              <Btn variant="ghost" onClick={()=>setEditRec(null)}>Cancel</Btn>
+              <Btn onClick={saveRecord}>Save</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Staff: read-only day detail */}
+      {viewRec&&(
+        <Modal title={fmtDate(viewRec.date)} onClose={()=>setViewRec(null)}>
+          <p style={{fontSize:13,color:C.text,marginBottom:8}}>Status: <b>{viewRec.status}</b></p>
+          {viewRec.checkIn&&(
+            <p style={{fontSize:13,color:C.text,marginBottom:6}}>Check-in: {fmtClockTime(viewRec.checkIn)}
+              {viewRec.checkInLoc&&<button onClick={()=>openMapLink(viewRec.checkInLoc)} style={{marginLeft:8,fontSize:11,color:C.accent,fontWeight:600}}>📍 Location</button>}
+            </p>
+          )}
+          {viewRec.checkOut&&(
+            <p style={{fontSize:13,color:C.text}}>Check-out: {fmtClockTime(viewRec.checkOut)}
+              {viewRec.checkOutLoc&&<button onClick={()=>openMapLink(viewRec.checkOutLoc)} style={{marginLeft:8,fontSize:11,color:C.accent,fontWeight:600}}>📍 Location</button>}
+            </p>
+          )}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────────────
 export default function App(){
@@ -2785,6 +2981,7 @@ export default function App(){
   const [tileCats,setTileCats]         = useState([]);
   const [tileDesigns,setTileDesigns]   = useState([]);
   const [tileMovements,setTileMovements] = useState([]);
+  const [attendance,setAttendance]       = useState([]);
   const [loading,setLoading]         = useState(true);
   const [toast,setToast]             = useState(null);
   const [showUserMgmt,setShowUserMgmt] = useState(false);
@@ -2824,16 +3021,17 @@ export default function App(){
     setLoading(true);
     const sid=currentShop.id;
     async function load(){
-      const [c,ct,t,pi,pd,st,sr,sc,tc,td,tm]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/price-items"),sget(sid+"/price-docs"),sget(sid+"/sop-templates"),sget(sid+"/sop-runs"),sget(sid+"/sop-categories"),sget(sid+"/tile-categories"),sget(sid+"/tile-designs"),sget(sid+"/tile-movements")]);
+      const [c,ct,t,pi,pd,st,sr,sc,tc,td,tm,att]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/price-items"),sget(sid+"/price-docs"),sget(sid+"/sop-templates"),sget(sid+"/sop-runs"),sget(sid+"/sop-categories"),sget(sid+"/tile-categories"),sget(sid+"/tile-designs"),sget(sid+"/tile-movements"),sget(sid+"/staff-attendance")]);
       setCustOrders(c||[]); setCats(ct||INITIAL_CATS); setTasks(t||[]); setPriceItems(pi||[]); setPriceDocs(pd||[]);
       setSopTemplates(st||[]); setSopRuns(sr||[]); setSopCats(sc||[]);
       setTileCats(tc||[]); setTileDesigns(td||[]); setTileMovements(tm||[]);
+      setAttendance(att||[]);
       setLoading(false);
     }
     load();
     const interval=setInterval(async()=>{
-      const [c,ct,t,sr,td,tm]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/sop-runs"),sget(sid+"/tile-designs"),sget(sid+"/tile-movements")]);
-      if(c) setCustOrders(c); if(ct) setCats(ct); if(t) setTasks(t); if(sr) setSopRuns(sr); if(td) setTileDesigns(td); if(tm) setTileMovements(tm);
+      const [c,ct,t,sr,td,tm,att]=await Promise.all([sget(sid+"/customer-orders"),sget(sid+"/reorder-cats"),sget(sid+"/tasks-v2"),sget(sid+"/sop-runs"),sget(sid+"/tile-designs"),sget(sid+"/tile-movements"),sget(sid+"/staff-attendance")]);
+      if(c) setCustOrders(c); if(ct) setCats(ct); if(t) setTasks(t); if(sr) setSopRuns(sr); if(td) setTileDesigns(td); if(tm) setTileMovements(tm); if(att) setAttendance(att);
     },5000);
     return()=>clearInterval(interval);
   },[user,currentShop]);
@@ -2892,6 +3090,19 @@ export default function App(){
   async function saveTileCats(next){ setTileCats(next); await sset(sid+"/tile-categories",next); }
   async function saveTileDesigns(next){ setTileDesigns(next); await sset(sid+"/tile-designs",next); }
   async function saveTileMovements(next){ setTileMovements(next); await sset(sid+"/tile-movements",next); }
+  async function saveAttendance(next){
+    next.forEach(rec=>{
+      const prev=attendance.find(a=>a.id===rec.id);
+      if(!prev && rec.checkIn && window.pushNotify){
+        window.pushNotify(`🕐 ${rec.staffName} checked in`, `${currentShop.name} · ${fmtClockTime(rec.checkIn)}`);
+      } else if(prev && !prev.checkOut && rec.checkOut && window.pushNotify){
+        const mins=Math.round((new Date(rec.checkOut)-new Date(rec.checkIn))/60000);
+        window.pushNotify(`🕐 ${rec.staffName} checked out`, `${currentShop.name} · ${fmtClockTime(rec.checkOut)} (worked ${Math.floor(mins/60)}h ${mins%60}m)`);
+      }
+    });
+    setAttendance(next);
+    await sset(sid+"/staff-attendance",next);
+  }
   async function saveSopRuns(next){
     const justCompleted=next.filter(r=>{
       const prev=sopRuns.find(x=>x.id===r.id);
@@ -2966,7 +3177,7 @@ export default function App(){
 
   const isAdmin=currentUser.role==="admin";
   const multiShop=userShops.length>1;
-  const sectionTitle={dashboard:"",orders:"Customer Orders",reorder:"Reorder List",tasks:"Tasks",shared:"Shared Space",prices:"Price List",sops:"SOPs",tiles:"Tile Stock"};
+  const sectionTitle={dashboard:"",orders:"Customer Orders",reorder:"Reorder List",tasks:"Tasks",shared:"Shared Space",prices:"Price List",sops:"SOPs",tiles:"Tile Stock",attendance:"Attendance"};
 
   return (
     <div style={{minHeight:"100vh",minHeight:"100dvh",background:C.bg,paddingBottom:"calc(72px + env(safe-area-inset-bottom))"}}>
@@ -3018,7 +3229,7 @@ export default function App(){
 
       {/* Full-width content — each section fills screen edge to edge */}
       <div style={{width:"100%",background:C.bg,minHeight:"calc(100dvh - 50px - 72px)"}}>
-        {section==="dashboard"&&<DashboardScreen user={user} custOrders={custOrders} cats={cats} tasks={tasks} priceItems={priceItems} sopTemplates={sopTemplates} sopRuns={sopRuns} tileDesigns={tileDesigns} tileMovements={tileMovements} setSection={setSection}/>}
+        {section==="dashboard"&&<DashboardScreen user={user} custOrders={custOrders} cats={cats} tasks={tasks} priceItems={priceItems} sopTemplates={sopTemplates} sopRuns={sopRuns} tileDesigns={tileDesigns} tileMovements={tileMovements} attendance={attendance} shopName={currentShop.name} onUpdateAttendance={saveAttendance} setSection={setSection}/>}
         {section==="orders"&&<CustomerOrdersScreen orders={custOrders} user={user} onUpdate={updateOrder} onAdd={upsertOrder} onDelete={deleteOrder}/>}
         {section==="reorder"&&<ReorderScreen cats={cats} user={user} onUpdateCats={saveCats} showToast={setToast}/>}
         {section==="tasks"&&<TasksScreen tasks={tasks} user={user} shopUsers={shopUsers.filter(u=>(u.shops||[]).includes(currentShop.id)||u.role==="admin")} onUpdateTasks={saveTasks}/>}
@@ -3026,6 +3237,7 @@ export default function App(){
         {section==="prices"&&<PriceListScreen priceItems={priceItems} priceDocs={priceDocs} user={user} onUpdateItems={savePriceItems} onUpdateDocs={savePriceDocs}/>}
         {section==="sops"&&<SOPsScreen templates={sopTemplates} runs={sopRuns} sopCats={sopCats} shopUsers={shopUsers.filter(u=>(u.shops||[]).includes(currentShop.id)||u.role==="admin")} user={user} isAdmin={isAdmin} onUpdateTemplates={saveSopTemplates} onUpdateRuns={saveSopRuns} onUpdateSopCats={saveSopCats}/>}
         {section==="tiles"&&<TileStockScreen designs={tileDesigns} movements={tileMovements} tileCats={tileCats} user={user} isAdmin={isAdmin} onUpdateDesigns={saveTileDesigns} onUpdateMovements={saveTileMovements} onUpdateTileCats={saveTileCats}/>}
+        {section==="attendance"&&<AttendanceScreen attendance={attendance} shopUsers={shopUsers.filter(u=>(u.shops||[]).includes(currentShop.id)||u.role==="admin")} user={user} isAdmin={isAdmin} onUpdate={saveAttendance}/>}
       </div>
 
       <BottomNav section={section} setSection={setSection} badges={badges}/>
