@@ -423,6 +423,13 @@ function fmtDate(iso) {
     year: "numeric"
   });
 }
+function fmtClockTime(iso) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleTimeString("en-IN", {
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -2048,6 +2055,130 @@ function BottomNav({
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD
 // ─────────────────────────────────────────────────────────────
+function getGPSLocation() {
+  return new Promise(resolve => {
+    if (!navigator.geolocation) {
+      resolve(null);
+      return;
+    }
+    const timer = setTimeout(() => resolve(null), 8000);
+    navigator.geolocation.getCurrentPosition(pos => {
+      clearTimeout(timer);
+      resolve({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude
+      });
+    }, () => {
+      clearTimeout(timer);
+      resolve(null);
+    }, {
+      timeout: 7000
+    });
+  });
+}
+function openMapLink(loc) {
+  if (loc) window.open(`https://www.google.com/maps?q=${loc.lat},${loc.lng}`, "_blank");
+}
+function AttendanceBanner({
+  attendance,
+  user,
+  shopName,
+  onUpdate,
+  onOpen
+}) {
+  const [busy, setBusy] = useState(false);
+  const today = ymd(new Date());
+  const rec = (attendance || []).find(a => a.staffName === user && a.date === today);
+  async function checkIn() {
+    setBusy(true);
+    const loc = await getGPSLocation();
+    const newRec = {
+      id: uid(),
+      staffName: user,
+      date: today,
+      checkIn: new Date().toISOString(),
+      checkInLoc: loc,
+      checkOut: null,
+      checkOutLoc: null,
+      status: "present"
+    };
+    onUpdate([newRec, ...attendance]);
+    setBusy(false);
+  }
+  async function checkOut() {
+    setBusy(true);
+    const loc = await getGPSLocation();
+    onUpdate(attendance.map(a => a.id === rec.id ? {
+      ...a,
+      checkOut: new Date().toISOString(),
+      checkOutLoc: loc
+    } : a));
+    setBusy(false);
+  }
+  if (rec && rec.checkOut) {
+    const mins = Math.round((new Date(rec.checkOut) - new Date(rec.checkIn)) / 60000);
+    return /*#__PURE__*/React.createElement("div", {
+      onClick: onOpen,
+      style: {
+        background: C.successLight,
+        border: `1.5px solid ${C.success}40`,
+        borderRadius: 12,
+        padding: "12px 14px",
+        marginBottom: 16,
+        cursor: "pointer"
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 12,
+        fontWeight: 700,
+        color: C.success
+      }
+    }, "✅ Checked out at ", fmtClockTime(rec.checkOut)), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        marginTop: 2
+      }
+    }, "Worked ", Math.floor(mins / 60), "h ", mins % 60, "m today · ", shopName));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      border: `1.5px solid ${C.border}`,
+      borderRadius: 12,
+      padding: "12px 14px",
+      marginBottom: 16,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: onOpen,
+    style: {
+      cursor: "pointer",
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: C.text
+    }
+  }, rec ? `Checked in at ${fmtClockTime(rec.checkIn)}` : "Not checked in yet"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: C.muted,
+      marginTop: 2
+    }
+  }, shopName)), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: rec ? "danger" : "success",
+    disabled: busy,
+    onClick: rec ? checkOut : checkIn
+  }, busy ? "..." : rec ? "Check Out" : "Check In"));
+}
 function DashboardScreen({
   user,
   custOrders,
@@ -2058,6 +2189,9 @@ function DashboardScreen({
   sopRuns,
   tileDesigns,
   tileMovements,
+  attendance,
+  shopName,
+  onUpdateAttendance,
   setSection
 }) {
   const day = new Date().toLocaleDateString("en-IN", {
@@ -2159,7 +2293,13 @@ function DashboardScreen({
       fontSize: 22,
       color: C.text
     }
-  }, "Good day, ", user.split(" ")[0], " 👋")), /*#__PURE__*/React.createElement("div", {
+  }, "Good day, ", user.split(" ")[0], " 👋")), /*#__PURE__*/React.createElement(AttendanceBanner, {
+    attendance: attendance,
+    user: user,
+    shopName: shopName,
+    onUpdate: onUpdateAttendance,
+    onOpen: () => setSection("attendance")
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "1fr",
@@ -8221,6 +8361,351 @@ function TileStockScreen({
 }
 
 // ─────────────────────────────────────────────────────────────
+// ATTENDANCE SCREEN
+// ─────────────────────────────────────────────────────────────
+function AttendanceScreen({
+  attendance,
+  shopUsers,
+  user,
+  isAdmin,
+  onUpdate
+}) {
+  const [month, setMonth] = useState(() => {
+    const d = new Date();
+    return {
+      y: d.getFullYear(),
+      m: d.getMonth()
+    };
+  });
+  const [editRec, setEditRec] = useState(null);
+  const [viewRec, setViewRec] = useState(null);
+  const daysInMonth = new Date(month.y, month.m + 1, 0).getDate();
+  const days = Array.from({
+    length: daysInMonth
+  }, (_, i) => i + 1);
+  const monthLabel = new Date(month.y, month.m, 1).toLocaleDateString("en-IN", {
+    month: "long",
+    year: "numeric"
+  });
+  const todayKey = ymd(new Date());
+  function dateKeyFor(d) {
+    return ymd(new Date(month.y, month.m, d));
+  }
+  function recordFor(staffName, d) {
+    return attendance.find(a => a.staffName === staffName && a.date === dateKeyFor(d));
+  }
+  const staffList = isAdmin ? shopUsers.map(u => u.displayName) : [user];
+  function openCell(staffName, d) {
+    const rec = recordFor(staffName, d);
+    if (!isAdmin) {
+      if (rec) setViewRec(rec);
+      return;
+    }
+    setEditRec({
+      staffName,
+      date: dateKeyFor(d),
+      status: rec?.status || "absent",
+      checkInTime: rec?.checkIn ? new Date(rec.checkIn).toTimeString().slice(0, 5) : "",
+      checkOutTime: rec?.checkOut ? new Date(rec.checkOut).toTimeString().slice(0, 5) : "",
+      existing: rec || null
+    });
+  }
+  function saveRecord() {
+    const existing = editRec.existing;
+    const checkIn = editRec.checkInTime ? new Date(`${editRec.date}T${editRec.checkInTime}`).toISOString() : null;
+    const checkOut = editRec.checkOutTime ? new Date(`${editRec.date}T${editRec.checkOutTime}`).toISOString() : null;
+    const rec = {
+      id: existing?.id || uid(),
+      staffName: editRec.staffName,
+      date: editRec.date,
+      checkIn,
+      checkInLoc: existing?.checkInLoc || null,
+      checkOut,
+      checkOutLoc: existing?.checkOutLoc || null,
+      status: editRec.status
+    };
+    if (existing) onUpdate(attendance.map(a => a.id === existing.id ? rec : a));else onUpdate([rec, ...attendance]);
+    setEditRec(null);
+  }
+  function deleteRecord() {
+    if (editRec.existing) onUpdate(attendance.filter(a => a.id !== editRec.existing.id));
+    setEditRec(null);
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "14px 12px 8px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setMonth(p => {
+      const d = new Date(p.y, p.m - 1, 1);
+      return {
+        y: d.getFullYear(),
+        m: d.getMonth()
+      };
+    }),
+    style: {
+      fontSize: 18,
+      padding: "4px 12px",
+      color: C.muted
+    }
+  }, "‹"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: F.display,
+      fontWeight: 700,
+      fontSize: 15,
+      color: C.text
+    }
+  }, monthLabel), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setMonth(p => {
+      const d = new Date(p.y, p.m + 1, 1);
+      return {
+        y: d.getFullYear(),
+        m: d.getMonth()
+      };
+    }),
+    style: {
+      fontSize: 18,
+      padding: "4px 12px",
+      color: C.muted
+    }
+  }, "›")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 14,
+      marginBottom: 16,
+      fontSize: 11,
+      color: C.muted
+    }
+  }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "inline-block",
+      width: 9,
+      height: 9,
+      borderRadius: 2,
+      background: C.success,
+      marginRight: 4
+    }
+  }), "Present"), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "inline-block",
+      width: 9,
+      height: 9,
+      borderRadius: 2,
+      background: C.warn,
+      marginRight: 4
+    }
+  }), "Half-day"), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "inline-block",
+      width: 9,
+      height: 9,
+      borderRadius: 2,
+      background: C.danger,
+      marginRight: 4
+    }
+  }), "Absent")), staffList.map(staffName => /*#__PURE__*/React.createElement("div", {
+    key: staffName,
+    style: {
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      color: C.text,
+      marginBottom: 6
+    }
+  }, staffName), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: "auto",
+      display: "flex",
+      gap: 4,
+      paddingBottom: 4
+    }
+  }, days.map(d => {
+    const rec = recordFor(staffName, d);
+    const isToday = dateKeyFor(d) === todayKey;
+    let bg = "#F1F5F9",
+      color = C.mutedLight,
+      label = "";
+    if (rec) {
+      if (rec.status === "present") {
+        bg = C.success;
+        color = "#fff";
+        label = "P";
+      } else if (rec.status === "half-day") {
+        bg = C.warn;
+        color = "#fff";
+        label = "H";
+      } else if (rec.status === "absent") {
+        bg = C.danger;
+        color = "#fff";
+        label = "A";
+      }
+    }
+    return /*#__PURE__*/React.createElement("button", {
+      key: d,
+      onClick: () => openCell(staffName, d),
+      style: {
+        minWidth: 30,
+        height: 36,
+        borderRadius: 7,
+        background: bg,
+        color,
+        fontSize: 10,
+        fontWeight: 700,
+        border: isToday ? `2px solid ${C.text}` : "none",
+        flexShrink: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 1
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 8,
+        opacity: .85
+      }
+    }, d), /*#__PURE__*/React.createElement("span", null, label));
+  })))), editRec && /*#__PURE__*/React.createElement(Modal, {
+    title: `${editRec.staffName} — ${fmtDate(editRec.date)}`,
+    onClose: () => setEditRec(null)
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Status"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: editRec.status,
+    onChange: e => setEditRec(p => ({
+      ...p,
+      status: e.target.value
+    })),
+    style: {
+      width: "100%",
+      padding: "9px 11px",
+      borderRadius: 8,
+      border: `1.5px solid ${C.border}`,
+      fontSize: 13,
+      color: C.text,
+      background: "#FAFBFD"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "present"
+  }, "Present"), /*#__PURE__*/React.createElement("option", {
+    value: "half-day"
+  }, "Half-day"), /*#__PURE__*/React.createElement("option", {
+    value: "absent"
+  }, "Absent"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Check-in time"
+  }, /*#__PURE__*/React.createElement(FInput, {
+    type: "time",
+    value: editRec.checkInTime,
+    onChange: v => setEditRec(p => ({
+      ...p,
+      checkInTime: v
+    }))
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Check-out time"
+  }, /*#__PURE__*/React.createElement(FInput, {
+    type: "time",
+    value: editRec.checkOutTime,
+    onChange: v => setEditRec(p => ({
+      ...p,
+      checkOutTime: v
+    }))
+  }))), editRec.existing && (editRec.existing.checkInLoc || editRec.existing.checkOutLoc) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 8
+    }
+  }, editRec.existing.checkInLoc && /*#__PURE__*/React.createElement("button", {
+    onClick: () => openMapLink(editRec.existing.checkInLoc),
+    style: {
+      fontSize: 11,
+      color: C.accent,
+      fontWeight: 600
+    }
+  }, "📍 Check-in location"), editRec.existing.checkOutLoc && /*#__PURE__*/React.createElement("button", {
+    onClick: () => openMapLink(editRec.existing.checkOutLoc),
+    style: {
+      fontSize: 11,
+      color: C.accent,
+      fontWeight: 600
+    }
+  }, "📍 Check-out location")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      justifyContent: "space-between",
+      marginTop: 8
+    }
+  }, editRec.existing ? /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    size: "sm",
+    onClick: deleteRecord
+  }, "Delete") : /*#__PURE__*/React.createElement("span", null), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setEditRec(null)
+  }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveRecord
+  }, "Save")))), viewRec && /*#__PURE__*/React.createElement(Modal, {
+    title: fmtDate(viewRec.date),
+    onClose: () => setViewRec(null)
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: C.text,
+      marginBottom: 8
+    }
+  }, "Status: ", /*#__PURE__*/React.createElement("b", null, viewRec.status)), viewRec.checkIn && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: C.text,
+      marginBottom: 6
+    }
+  }, "Check-in: ", fmtClockTime(viewRec.checkIn), viewRec.checkInLoc && /*#__PURE__*/React.createElement("button", {
+    onClick: () => openMapLink(viewRec.checkInLoc),
+    style: {
+      marginLeft: 8,
+      fontSize: 11,
+      color: C.accent,
+      fontWeight: 600
+    }
+  }, "📍 Location")), viewRec.checkOut && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: C.text
+    }
+  }, "Check-out: ", fmtClockTime(viewRec.checkOut), viewRec.checkOutLoc && /*#__PURE__*/React.createElement("button", {
+    onClick: () => openMapLink(viewRec.checkOutLoc),
+    style: {
+      marginLeft: 8,
+      fontSize: 11,
+      color: C.accent,
+      fontWeight: 600
+    }
+  }, "📍 Location"))));
+}
+
+// ─────────────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────────────
 function App() {
@@ -8242,6 +8727,7 @@ function App() {
   const [tileCats, setTileCats] = useState([]);
   const [tileDesigns, setTileDesigns] = useState([]);
   const [tileMovements, setTileMovements] = useState([]);
+  const [attendance, setAttendance] = useState([]);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
   const [showUserMgmt, setShowUserMgmt] = useState(false);
@@ -8287,7 +8773,7 @@ function App() {
     setLoading(true);
     const sid = currentShop.id;
     async function load() {
-      const [c, ct, t, pi, pd, st, sr, sc, tc, td, tm] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/price-items"), sget(sid + "/price-docs"), sget(sid + "/sop-templates"), sget(sid + "/sop-runs"), sget(sid + "/sop-categories"), sget(sid + "/tile-categories"), sget(sid + "/tile-designs"), sget(sid + "/tile-movements")]);
+      const [c, ct, t, pi, pd, st, sr, sc, tc, td, tm, att] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/price-items"), sget(sid + "/price-docs"), sget(sid + "/sop-templates"), sget(sid + "/sop-runs"), sget(sid + "/sop-categories"), sget(sid + "/tile-categories"), sget(sid + "/tile-designs"), sget(sid + "/tile-movements"), sget(sid + "/staff-attendance")]);
       setCustOrders(c || []);
       setCats(ct || INITIAL_CATS);
       setTasks(t || []);
@@ -8299,17 +8785,19 @@ function App() {
       setTileCats(tc || []);
       setTileDesigns(td || []);
       setTileMovements(tm || []);
+      setAttendance(att || []);
       setLoading(false);
     }
     load();
     const interval = setInterval(async () => {
-      const [c, ct, t, sr, td, tm] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/sop-runs"), sget(sid + "/tile-designs"), sget(sid + "/tile-movements")]);
+      const [c, ct, t, sr, td, tm, att] = await Promise.all([sget(sid + "/customer-orders"), sget(sid + "/reorder-cats"), sget(sid + "/tasks-v2"), sget(sid + "/sop-runs"), sget(sid + "/tile-designs"), sget(sid + "/tile-movements"), sget(sid + "/staff-attendance")]);
       if (c) setCustOrders(c);
       if (ct) setCats(ct);
       if (t) setTasks(t);
       if (sr) setSopRuns(sr);
       if (td) setTileDesigns(td);
       if (tm) setTileMovements(tm);
+      if (att) setAttendance(att);
     }, 5000);
     return () => clearInterval(interval);
   }, [user, currentShop]);
@@ -8412,6 +8900,19 @@ function App() {
     setTileMovements(next);
     await sset(sid + "/tile-movements", next);
   }
+  async function saveAttendance(next) {
+    next.forEach(rec => {
+      const prev = attendance.find(a => a.id === rec.id);
+      if (!prev && rec.checkIn && window.pushNotify) {
+        window.pushNotify(`🕐 ${rec.staffName} checked in`, `${currentShop.name} · ${fmtClockTime(rec.checkIn)}`);
+      } else if (prev && !prev.checkOut && rec.checkOut && window.pushNotify) {
+        const mins = Math.round((new Date(rec.checkOut) - new Date(rec.checkIn)) / 60000);
+        window.pushNotify(`🕐 ${rec.staffName} checked out`, `${currentShop.name} · ${fmtClockTime(rec.checkOut)} (worked ${Math.floor(mins / 60)}h ${mins % 60}m)`);
+      }
+    });
+    setAttendance(next);
+    await sset(sid + "/staff-attendance", next);
+  }
   async function saveSopRuns(next) {
     const justCompleted = next.filter(r => {
       const prev = sopRuns.find(x => x.id === r.id);
@@ -8512,7 +9013,8 @@ function App() {
     shared: "Shared Space",
     prices: "Price List",
     sops: "SOPs",
-    tiles: "Tile Stock"
+    tiles: "Tile Stock",
+    attendance: "Attendance"
   };
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -8665,6 +9167,9 @@ function App() {
     sopRuns: sopRuns,
     tileDesigns: tileDesigns,
     tileMovements: tileMovements,
+    attendance: attendance,
+    shopName: currentShop.name,
+    onUpdateAttendance: saveAttendance,
     setSection: setSection
   }), section === "orders" && /*#__PURE__*/React.createElement(CustomerOrdersScreen, {
     orders: custOrders,
@@ -8713,6 +9218,12 @@ function App() {
     onUpdateDesigns: saveTileDesigns,
     onUpdateMovements: saveTileMovements,
     onUpdateTileCats: saveTileCats
+  }), section === "attendance" && /*#__PURE__*/React.createElement(AttendanceScreen, {
+    attendance: attendance,
+    shopUsers: shopUsers.filter(u => (u.shops || []).includes(currentShop.id) || u.role === "admin"),
+    user: user,
+    isAdmin: isAdmin,
+    onUpdate: saveAttendance
   })), /*#__PURE__*/React.createElement(BottomNav, {
     section: section,
     setSection: setSection,
