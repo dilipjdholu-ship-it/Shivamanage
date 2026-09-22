@@ -2838,6 +2838,32 @@ function AttendanceScreen({attendance,shopUsers,user,isAdmin,onUpdate}){
 
   const staffList = isAdmin ? shopUsers.map(u=>u.displayName) : [user];
 
+  function statsFor(staffName){
+    let present=0, half=0, absent=0, mins=0;
+    days.forEach(d=>{
+      const rec=recordFor(staffName,d);
+      if(!rec) return;
+      if(rec.status==="present") present++;
+      else if(rec.status==="half-day") half++;
+      else if(rec.status==="absent") absent++;
+      if(rec.checkIn&&rec.checkOut) mins+=Math.round((new Date(rec.checkOut)-new Date(rec.checkIn))/60000);
+    });
+    return {present,half,absent,mins};
+  }
+  function fmtHM(mins){ return `${Math.floor(mins/60)}h ${mins%60}m`; }
+
+  async function shareReport(){
+    const lines=staffList.map(name=>{
+      const s=statsFor(name);
+      return `${name}: ${s.present}P, ${s.half}H, ${s.absent}A, ${fmtHM(s.mins)}`;
+    });
+    const text=`Attendance — ${monthLabel}\n${lines.join("\n")}`;
+    try{
+      if(navigator.share){ await navigator.share({text}); return; }
+    }catch(e){}
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`,"_blank");
+  }
+
   function openCell(staffName,d){
     const rec=recordFor(staffName,d);
     if(!isAdmin){ if(rec) setViewRec(rec); return; }
@@ -2877,15 +2903,28 @@ function AttendanceScreen({attendance,shopUsers,user,isAdmin,onUpdate}){
         <button onClick={()=>setMonth(p=>{const d=new Date(p.y,p.m+1,1);return {y:d.getFullYear(),m:d.getMonth()};})} style={{fontSize:18,padding:"4px 12px",color:C.muted}}>›</button>
       </div>
 
+      {isAdmin&&(
+        <div style={{marginBottom:14}}>
+          <Btn variant="ghost" size="sm" onClick={shareReport}>📤 Share Report</Btn>
+        </div>
+      )}
+
       <div style={{display:"flex",gap:14,marginBottom:16,fontSize:11,color:C.muted}}>
         <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.success,marginRight:4}}/>Present</span>
         <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.warn,marginRight:4}}/>Half-day</span>
         <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.danger,marginRight:4}}/>Absent</span>
       </div>
 
-      {staffList.map(staffName=>(
+      {staffList.map(staffName=>{
+        const stats=statsFor(staffName);
+        return (
         <div key={staffName} style={{marginBottom:18}}>
-          <p style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:6}}>{staffName}</p>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6}}>
+            <p style={{fontSize:13,fontWeight:700,color:C.text}}>{staffName}</p>
+            <p style={{fontSize:11,color:C.muted}}>
+              <span style={{color:C.success,fontWeight:700}}>{stats.present}P</span> · <span style={{color:C.warn,fontWeight:700}}>{stats.half}H</span> · <span style={{color:C.danger,fontWeight:700}}>{stats.absent}A</span> · {fmtHM(stats.mins)}
+            </p>
+          </div>
           <div style={{overflowX:"auto",display:"flex",gap:4,paddingBottom:4}}>
             {days.map(d=>{
               const rec=recordFor(staffName,d);
@@ -2906,7 +2945,8 @@ function AttendanceScreen({attendance,shopUsers,user,isAdmin,onUpdate}){
             })}
           </div>
         </div>
-      ))}
+        );
+      })}
 
       {/* Admin: add/edit a day's record */}
       {editRec&&(
