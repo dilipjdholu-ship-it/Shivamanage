@@ -2825,6 +2825,7 @@ function TileStockScreen({designs,movements,tileCats,user,isAdmin,onUpdateDesign
 // ─────────────────────────────────────────────────────────────
 function AttendanceScreen({attendance,shopUsers,user,isAdmin,onUpdate}){
   const [month,setMonth]   = useState(()=>{const d=new Date();return {y:d.getFullYear(),m:d.getMonth()};});
+  const [selectedStaff,setSelectedStaff] = useState(isAdmin?null:user);
   const [editRec,setEditRec] = useState(null);
   const [viewRec,setViewRec] = useState(null);
 
@@ -2832,6 +2833,7 @@ function AttendanceScreen({attendance,shopUsers,user,isAdmin,onUpdate}){
   const days = Array.from({length:daysInMonth},(_,i)=>i+1);
   const monthLabel = new Date(month.y,month.m,1).toLocaleDateString("en-IN",{month:"long",year:"numeric"});
   const todayKey = ymd(new Date());
+  const firstDow = new Date(month.y,month.m,1).getDay();
 
   function dateKeyFor(d){ return ymd(new Date(month.y,month.m,d)); }
   function recordFor(staffName,d){ return attendance.find(a=>a.staffName===staffName&&a.date===dateKeyFor(d)); }
@@ -2852,12 +2854,9 @@ function AttendanceScreen({attendance,shopUsers,user,isAdmin,onUpdate}){
   }
   function fmtHM(mins){ return `${Math.floor(mins/60)}h ${mins%60}m`; }
 
-  async function shareReport(){
-    const lines=staffList.map(name=>{
-      const s=statsFor(name);
-      return `${name}: ${s.present}P, ${s.half}H, ${s.absent}A, ${fmtHM(s.mins)}`;
-    });
-    const text=`Attendance — ${monthLabel}\n${lines.join("\n")}`;
+  async function shareReport(staffName){
+    const s=statsFor(staffName);
+    const text=`Attendance — ${staffName} — ${monthLabel}\n${s.present}P, ${s.half}H, ${s.absent}A, ${fmtHM(s.mins)}`;
     try{
       if(navigator.share){ await navigator.share({text}); return; }
     }catch(e){}
@@ -2895,58 +2894,90 @@ function AttendanceScreen({attendance,shopUsers,user,isAdmin,onUpdate}){
     setEditRec(null);
   }
 
+  const MonthNav=(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+      <button onClick={()=>setMonth(p=>{const d=new Date(p.y,p.m-1,1);return {y:d.getFullYear(),m:d.getMonth()};})} style={{fontSize:18,padding:"4px 12px",color:C.muted}}>‹</button>
+      <p style={{fontFamily:F.display,fontWeight:700,fontSize:15,color:C.text}}>{monthLabel}</p>
+      <button onClick={()=>setMonth(p=>{const d=new Date(p.y,p.m+1,1);return {y:d.getFullYear(),m:d.getMonth()};})} style={{fontSize:18,padding:"4px 12px",color:C.muted}}>›</button>
+    </div>
+  );
+  const Legend=(
+    <div style={{display:"flex",gap:14,marginBottom:16,fontSize:11,color:C.muted}}>
+      <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.success,marginRight:4}}/>Present</span>
+      <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.warn,marginRight:4}}/>Half-day</span>
+      <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.danger,marginRight:4}}/>Absent</span>
+    </div>
+  );
+
+  // ── Staff list (admin, before drilling into a person) ──
+  if(isAdmin && !selectedStaff){
+    return (
+      <div style={{padding:"14px 12px 8px"}}>
+        {MonthNav}
+        {Legend}
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {staffList.map(name=>{
+            const s=statsFor(name);
+            return (
+              <div key={name} onClick={()=>setSelectedStaff(name)} style={{background:C.surface,borderRadius:10,padding:"12px 14px",border:`1.5px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+                <p style={{fontSize:14,fontWeight:700,color:C.text}}>{name}</p>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <p style={{fontSize:11,color:C.muted}}>
+                    <span style={{color:C.success,fontWeight:700}}>{s.present}P</span> · <span style={{color:C.warn,fontWeight:700}}>{s.half}H</span> · <span style={{color:C.danger,fontWeight:700}}>{s.absent}A</span> · {fmtHM(s.mins)}
+                  </p>
+                  <span style={{color:C.mutedLight,fontSize:16}}>›</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Calendar view for the selected/own staff member ──
+  const staffName=selectedStaff;
+  const stats=statsFor(staffName);
+
   return (
     <div style={{padding:"14px 12px 8px"}}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
-        <button onClick={()=>setMonth(p=>{const d=new Date(p.y,p.m-1,1);return {y:d.getFullYear(),m:d.getMonth()};})} style={{fontSize:18,padding:"4px 12px",color:C.muted}}>‹</button>
-        <p style={{fontFamily:F.display,fontWeight:700,fontSize:15,color:C.text}}>{monthLabel}</p>
-        <button onClick={()=>setMonth(p=>{const d=new Date(p.y,p.m+1,1);return {y:d.getFullYear(),m:d.getMonth()};})} style={{fontSize:18,padding:"4px 12px",color:C.muted}}>›</button>
+      {isAdmin&&<button onClick={()=>setSelectedStaff(null)} style={{fontSize:12,color:C.accent,fontWeight:600,marginBottom:12}}>‹ All staff</button>}
+      {MonthNav}
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+        <div>
+          <p style={{fontFamily:F.display,fontWeight:700,fontSize:16,color:C.text}}>{staffName}</p>
+          <p style={{fontSize:11,color:C.muted,marginTop:2}}>
+            <span style={{color:C.success,fontWeight:700}}>{stats.present}P</span> · <span style={{color:C.warn,fontWeight:700}}>{stats.half}H</span> · <span style={{color:C.danger,fontWeight:700}}>{stats.absent}A</span> · {fmtHM(stats.mins)}
+          </p>
+        </div>
+        <Btn variant="ghost" size="sm" onClick={()=>shareReport(staffName)}>📤 Share</Btn>
       </div>
 
-      {isAdmin&&(
-        <div style={{marginBottom:14}}>
-          <Btn variant="ghost" size="sm" onClick={shareReport}>📤 Share Report</Btn>
-        </div>
-      )}
+      {Legend}
 
-      <div style={{display:"flex",gap:14,marginBottom:16,fontSize:11,color:C.muted}}>
-        <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.success,marginRight:4}}/>Present</span>
-        <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.warn,marginRight:4}}/>Half-day</span>
-        <span><span style={{display:"inline-block",width:9,height:9,borderRadius:2,background:C.danger,marginRight:4}}/>Absent</span>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:6,marginBottom:6}}>
+        {["S","M","T","W","T","F","S"].map((d,i)=><p key={i} style={{textAlign:"center",fontSize:10,fontWeight:700,color:C.mutedLight}}>{d}</p>)}
       </div>
-
-      {staffList.map(staffName=>{
-        const stats=statsFor(staffName);
-        return (
-        <div key={staffName} style={{marginBottom:18}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6}}>
-            <p style={{fontSize:13,fontWeight:700,color:C.text}}>{staffName}</p>
-            <p style={{fontSize:11,color:C.muted}}>
-              <span style={{color:C.success,fontWeight:700}}>{stats.present}P</span> · <span style={{color:C.warn,fontWeight:700}}>{stats.half}H</span> · <span style={{color:C.danger,fontWeight:700}}>{stats.absent}A</span> · {fmtHM(stats.mins)}
-            </p>
-          </div>
-          <div style={{overflowX:"auto",display:"flex",gap:4,paddingBottom:4}}>
-            {days.map(d=>{
-              const rec=recordFor(staffName,d);
-              const isToday=dateKeyFor(d)===todayKey;
-              let bg="#F1F5F9", color=C.mutedLight, label="";
-              if(rec){
-                if(rec.status==="present"){bg=C.success;color="#fff";label="P";}
-                else if(rec.status==="half-day"){bg=C.warn;color="#fff";label="H";}
-                else if(rec.status==="absent"){bg=C.danger;color="#fff";label="A";}
-              }
-              return (
-                <button key={d} onClick={()=>openCell(staffName,d)}
-                  style={{minWidth:30,height:36,borderRadius:7,background:bg,color,fontSize:10,fontWeight:700,border:isToday?`2px solid ${C.text}`:"none",flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:1}}>
-                  <span style={{fontSize:8,opacity:.85}}>{d}</span>
-                  <span>{label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-        );
-      })}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:6}}>
+        {Array.from({length:firstDow}).map((_,i)=><div key={"blank"+i}/>)}
+        {days.map(d=>{
+          const rec=recordFor(staffName,d);
+          const isToday=dateKeyFor(d)===todayKey;
+          let bg="#F1F5F9", color=C.mutedLight;
+          if(rec){
+            if(rec.status==="present"){bg=C.success;color="#fff";}
+            else if(rec.status==="half-day"){bg=C.warn;color="#fff";}
+            else if(rec.status==="absent"){bg=C.danger;color="#fff";}
+          }
+          return (
+            <button key={d} onClick={()=>openCell(staffName,d)}
+              style={{aspectRatio:"1",borderRadius:9,background:bg,color,fontSize:13,fontWeight:700,border:isToday?`2px solid ${C.text}`:"none"}}>
+              {d}
+            </button>
+          );
+        })}
+      </div>
 
       {/* Admin: add/edit a day's record */}
       {editRec&&(
