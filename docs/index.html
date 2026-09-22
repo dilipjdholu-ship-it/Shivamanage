@@ -8377,6 +8377,7 @@ function AttendanceScreen({
       m: d.getMonth()
     };
   });
+  const [selectedStaff, setSelectedStaff] = useState(isAdmin ? null : user);
   const [editRec, setEditRec] = useState(null);
   const [viewRec, setViewRec] = useState(null);
   const daysInMonth = new Date(month.y, month.m + 1, 0).getDate();
@@ -8388,6 +8389,7 @@ function AttendanceScreen({
     year: "numeric"
   });
   const todayKey = ymd(new Date());
+  const firstDow = new Date(month.y, month.m, 1).getDay();
   function dateKeyFor(d) {
     return ymd(new Date(month.y, month.m, d));
   }
@@ -8416,12 +8418,9 @@ function AttendanceScreen({
   function fmtHM(mins) {
     return `${Math.floor(mins / 60)}h ${mins % 60}m`;
   }
-  async function shareReport() {
-    const lines = staffList.map(name => {
-      const s = statsFor(name);
-      return `${name}: ${s.present}P, ${s.half}H, ${s.absent}A, ${fmtHM(s.mins)}`;
-    });
-    const text = `Attendance — ${monthLabel}\n${lines.join("\n")}`;
+  async function shareReport(staffName) {
+    const s = statsFor(staffName);
+    const text = `Attendance — ${staffName} — ${monthLabel}\n${s.present}P, ${s.half}H, ${s.absent}A, ${fmtHM(s.mins)}`;
     try {
       if (navigator.share) {
         await navigator.share({
@@ -8468,11 +8467,7 @@ function AttendanceScreen({
     if (editRec.existing) onUpdate(attendance.filter(a => a.id !== editRec.existing.id));
     setEditRec(null);
   }
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: "14px 12px 8px"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
+  const MonthNav = /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -8512,15 +8507,8 @@ function AttendanceScreen({
       padding: "4px 12px",
       color: C.muted
     }
-  }, "›")), isAdmin && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    size: "sm",
-    onClick: shareReport
-  }, "📤 Share Report")), /*#__PURE__*/React.createElement("div", {
+  }, "›"));
+  const Legend = /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 14,
@@ -8555,101 +8543,186 @@ function AttendanceScreen({
       background: C.danger,
       marginRight: 4
     }
-  }), "Absent")), staffList.map(staffName => {
-    const stats = statsFor(staffName);
+  }), "Absent"));
+
+  // ── Staff list (admin, before drilling into a person) ──
+  if (isAdmin && !selectedStaff) {
     return /*#__PURE__*/React.createElement("div", {
-      key: staffName,
       style: {
-        marginBottom: 18
+        padding: "14px 12px 8px"
       }
-    }, /*#__PURE__*/React.createElement("div", {
+    }, MonthNav, Legend, /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
-        justifyContent: "space-between",
-        alignItems: "baseline",
-        marginBottom: 6
+        flexDirection: "column",
+        gap: 8
       }
-    }, /*#__PURE__*/React.createElement("p", {
-      style: {
-        fontSize: 13,
-        fontWeight: 700,
-        color: C.text
-      }
-    }, staffName), /*#__PURE__*/React.createElement("p", {
-      style: {
-        fontSize: 11,
-        color: C.muted
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: C.success,
-        fontWeight: 700
-      }
-    }, stats.present, "P"), " · ", /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: C.warn,
-        fontWeight: 700
-      }
-    }, stats.half, "H"), " · ", /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: C.danger,
-        fontWeight: 700
-      }
-    }, stats.absent, "A"), " · ", fmtHM(stats.mins))), /*#__PURE__*/React.createElement("div", {
-      style: {
-        overflowX: "auto",
-        display: "flex",
-        gap: 4,
-        paddingBottom: 4
-      }
-    }, days.map(d => {
-      const rec = recordFor(staffName, d);
-      const isToday = dateKeyFor(d) === todayKey;
-      let bg = "#F1F5F9",
-        color = C.mutedLight,
-        label = "";
-      if (rec) {
-        if (rec.status === "present") {
-          bg = C.success;
-          color = "#fff";
-          label = "P";
-        } else if (rec.status === "half-day") {
-          bg = C.warn;
-          color = "#fff";
-          label = "H";
-        } else if (rec.status === "absent") {
-          bg = C.danger;
-          color = "#fff";
-          label = "A";
-        }
-      }
-      return /*#__PURE__*/React.createElement("button", {
-        key: d,
-        onClick: () => openCell(staffName, d),
+    }, staffList.map(name => {
+      const s = statsFor(name);
+      return /*#__PURE__*/React.createElement("div", {
+        key: name,
+        onClick: () => setSelectedStaff(name),
         style: {
-          minWidth: 30,
-          height: 36,
-          borderRadius: 7,
-          background: bg,
-          color,
-          fontSize: 10,
-          fontWeight: 700,
-          border: isToday ? `2px solid ${C.text}` : "none",
-          flexShrink: 0,
+          background: C.surface,
+          borderRadius: 10,
+          padding: "12px 14px",
+          border: `1.5px solid ${C.border}`,
           display: "flex",
-          flexDirection: "column",
+          justifyContent: "space-between",
           alignItems: "center",
-          justifyContent: "center",
-          gap: 1
+          cursor: "pointer"
+        }
+      }, /*#__PURE__*/React.createElement("p", {
+        style: {
+          fontSize: 14,
+          fontWeight: 700,
+          color: C.text
+        }
+      }, name), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 8
+        }
+      }, /*#__PURE__*/React.createElement("p", {
+        style: {
+          fontSize: 11,
+          color: C.muted
         }
       }, /*#__PURE__*/React.createElement("span", {
         style: {
-          fontSize: 8,
-          opacity: .85
+          color: C.success,
+          fontWeight: 700
         }
-      }, d), /*#__PURE__*/React.createElement("span", null, label));
+      }, s.present, "P"), " · ", /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: C.warn,
+          fontWeight: 700
+        }
+      }, s.half, "H"), " · ", /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: C.danger,
+          fontWeight: 700
+        }
+      }, s.absent, "A"), " · ", fmtHM(s.mins)), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: C.mutedLight,
+          fontSize: 16
+        }
+      }, "›")));
     })));
-  }), editRec && /*#__PURE__*/React.createElement(Modal, {
+  }
+
+  // ── Calendar view for the selected/own staff member ──
+  const staffName = selectedStaff;
+  const stats = statsFor(staffName);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "14px 12px 8px"
+    }
+  }, isAdmin && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSelectedStaff(null),
+    style: {
+      fontSize: 12,
+      color: C.accent,
+      fontWeight: 600,
+      marginBottom: 12
+    }
+  }, "‹ All staff"), MonthNav, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "flex-start",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: F.display,
+      fontWeight: 700,
+      fontSize: 16,
+      color: C.text
+    }
+  }, staffName), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: C.muted,
+      marginTop: 2
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.success,
+      fontWeight: 700
+    }
+  }, stats.present, "P"), " · ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.warn,
+      fontWeight: 700
+    }
+  }, stats.half, "H"), " · ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.danger,
+      fontWeight: 700
+    }
+  }, stats.absent, "A"), " · ", fmtHM(stats.mins))), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => shareReport(staffName)
+  }, "📤 Share")), Legend, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(7,1fr)",
+      gap: 6,
+      marginBottom: 6
+    }
+  }, ["S", "M", "T", "W", "T", "F", "S"].map((d, i) => /*#__PURE__*/React.createElement("p", {
+    key: i,
+    style: {
+      textAlign: "center",
+      fontSize: 10,
+      fontWeight: 700,
+      color: C.mutedLight
+    }
+  }, d))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(7,1fr)",
+      gap: 6
+    }
+  }, Array.from({
+    length: firstDow
+  }).map((_, i) => /*#__PURE__*/React.createElement("div", {
+    key: "blank" + i
+  })), days.map(d => {
+    const rec = recordFor(staffName, d);
+    const isToday = dateKeyFor(d) === todayKey;
+    let bg = "#F1F5F9",
+      color = C.mutedLight;
+    if (rec) {
+      if (rec.status === "present") {
+        bg = C.success;
+        color = "#fff";
+      } else if (rec.status === "half-day") {
+        bg = C.warn;
+        color = "#fff";
+      } else if (rec.status === "absent") {
+        bg = C.danger;
+        color = "#fff";
+      }
+    }
+    return /*#__PURE__*/React.createElement("button", {
+      key: d,
+      onClick: () => openCell(staffName, d),
+      style: {
+        aspectRatio: "1",
+        borderRadius: 9,
+        background: bg,
+        color,
+        fontSize: 13,
+        fontWeight: 700,
+        border: isToday ? `2px solid ${C.text}` : "none"
+      }
+    }, d);
+  })), editRec && /*#__PURE__*/React.createElement(Modal, {
     title: `${editRec.staffName} — ${fmtDate(editRec.date)}`,
     onClose: () => setEditRec(null)
   }, /*#__PURE__*/React.createElement(Field, {
