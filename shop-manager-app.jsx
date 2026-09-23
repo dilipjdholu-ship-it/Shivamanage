@@ -132,9 +132,14 @@ async function sget(k){
 async function sset(k,v){
   try{
     const result=await window.storage.set(k,JSON.stringify(v),true);
+    if(!result){
+      if(window._showSaveError) window._showSaveError();
+      return false;
+    }
     return true;
   }catch(e){
     console.error("sset failed:",k,e);
+    if(window._showSaveError) window._showSaveError();
     return false;
   }
 }
@@ -1097,7 +1102,7 @@ function OrderDetailModal({order,user,onUpdate,onDelete,onEdit,onClose}){
 
       {/* Delete */}
       <div style={{paddingTop:12,borderTop:`1px solid ${C.border}`,display:"flex",justifyContent:"flex-end"}}>
-        <button onClick={()=>{ onDelete(order.id); onClose(); }} style={{fontSize:12,color:C.danger,padding:"6px 10px",borderRadius:7,border:`1px solid ${C.danger}30`}}>Delete order</button>
+        <button onClick={()=>{ if(window.confirm("Delete this order? This can't be undone.")){ onDelete(order.id); onClose(); } }} style={{fontSize:12,color:C.danger,padding:"6px 10px",borderRadius:7,border:`1px solid ${C.danger}30`}}>Delete order</button>
       </div>
 
       {lightbox!==null&&<PhotoLightbox photos={order.photos||[]} startIndex={lightbox} onClose={()=>setLightbox(null)}/>}
@@ -1235,7 +1240,7 @@ function ReorderScreen({cats,user,onUpdateCats,showToast}){
   }
 
   function updateCat(updated){ onUpdateCats(cats.map(c=>c.id===updated.id?updated:c)); }
-  function deleteCat(id){ onUpdateCats(cats.filter(c=>c.id!==id)); }
+  function deleteCat(id){ if(!window.confirm("Delete this whole category and all its items?")) return; onUpdateCats(cats.filter(c=>c.id!==id)); }
   function toggleSel(id,forceRemove=false){ setSelIds(prev=>{ const n=new Set(prev); if(forceRemove||n.has(id)) n.delete(id); else n.add(id); return n; }); }
 
   function addCategory(){
@@ -1358,7 +1363,7 @@ function ReorderScreen({cats,user,onUpdateCats,showToast}){
                       </div>
                       {/* Delete button — only in normal mode */}
                       {!selMode&&(
-                        <button onClick={e=>{e.stopPropagation();onUpdateCats(cats.map(c=>c.id===cat.id?{...c,items:c.items.filter(i=>i.id!==item.id)}:c));}}
+                        <button onClick={e=>{e.stopPropagation();if(window.confirm("Remove this item from the reorder list?"))onUpdateCats(cats.map(c=>c.id===cat.id?{...c,items:c.items.filter(i=>i.id!==item.id)}:c));}}
                           title="Remove item"
                           style={{color:"#CBD5E1",fontSize:17,padding:"3px 5px",flexShrink:0,lineHeight:1}}>×</button>
                       )}
@@ -1539,7 +1544,7 @@ function TasksScreen({tasks,user,shopUsers,onUpdateTasks}){
   }
 
   function updateTask(updated){ onUpdateTasks(tasks.map(t=>t.id===updated.id?updated:t)); if(openTask?.id===updated.id) setOpenTask(updated); }
-  function deleteTask(id){ onUpdateTasks(tasks.filter(t=>t.id!==id)); setOpenTask(null); }
+  function deleteTask(id){ if(!window.confirm("Delete this task?")) return; onUpdateTasks(tasks.filter(t=>t.id!==id)); setOpenTask(null); }
 
   function addComment(task){
     if(!comment.trim()) return;
@@ -1893,7 +1898,7 @@ function SharedRequestDetail({req,currentShop,user,onUpdate,onDelete,onClose}){
       </div>
 
       <div style={{paddingTop:12,borderTop:`1px solid ${C.border}`,display:"flex",justifyContent:"flex-end"}}>
-        <button onClick={()=>{onDelete(req.id);onClose();}} style={{fontSize:12,color:C.danger,padding:"5px 10px",borderRadius:7,border:`1px solid ${C.danger}30`}}>Delete request</button>
+        <button onClick={()=>{ if(window.confirm("Delete this shared request?")){ onDelete(req.id); onClose(); } }} style={{fontSize:12,color:C.danger,padding:"5px 10px",borderRadius:7,border:`1px solid ${C.danger}30`}}>Delete request</button>
       </div>
     </Modal>
   );
@@ -2031,7 +2036,7 @@ function PriceListScreen({priceItems,priceDocs,user,onUpdateItems,onUpdateDocs})
     setNi({code:"",name:"",unit:"pcs",price:"",category:""}); setShowAdd(false); setEditItem(null);
   }
 
-  function deleteItem(id){ onUpdateItems(priceItems.filter(i=>i.id!==id)); }
+  function deleteItem(id){ if(!window.confirm("Delete this price list item?")) return; onUpdateItems(priceItems.filter(i=>i.id!==id)); }
 
   async function uploadDoc(e){
     const file=e.target.files[0]; if(!file) return;
@@ -2138,7 +2143,7 @@ function PriceListScreen({priceItems,priceDocs,user,onUpdateItems,onUpdateDocs})
                   </div>
                   <div style={{display:"flex",gap:8,flexShrink:0}}>
                     <button onClick={()=>viewDoc(doc)} style={{fontSize:13,color:C.accent,fontWeight:700,padding:"6px 10px",borderRadius:7,border:`1px solid ${C.border}`}}>View</button>
-                    <button onClick={()=>onUpdateDocs(priceDocs.filter(d=>d.id!==doc.id))} style={{fontSize:13,color:C.danger,padding:"6px 8px",borderRadius:7,border:`1px solid ${C.danger}30`}}>×</button>
+                    <button onClick={()=>{if(window.confirm("Delete this document?"))onUpdateDocs(priceDocs.filter(d=>d.id!==doc.id));}} style={{fontSize:13,color:C.danger,padding:"6px 8px",borderRadius:7,border:`1px solid ${C.danger}30`}}>×</button>
                   </div>
                 </div>
               ))}
@@ -2309,7 +2314,7 @@ function SOPsScreen({templates,runs,sopCats,shopUsers,user,isAdmin,onUpdateTempl
     else onUpdateTemplates([tpl,...templates]);
     setShowAdd(false); setEditTpl(null);
   }
-  function deactivateTemplate(id){ onUpdateTemplates(templates.map(t=>t.id===id?{...t,active:false}:t)); setShowAdd(false); }
+  function deactivateTemplate(id){ if(!window.confirm("Deactivate this SOP? It will disappear from the active list.")) return; onUpdateTemplates(templates.map(t=>t.id===id?{...t,active:false}:t)); setShowAdd(false); }
 
   function toggleAssignee(name){
     setNt(p=>({...p,assignedTo:p.assignedTo.includes(name)?p.assignedTo.filter(n=>n!==name):[...p.assignedTo,name]}));
@@ -2321,6 +2326,7 @@ function SOPsScreen({templates,runs,sopCats,shopUsers,user,isAdmin,onUpdateTempl
     setNewCat({name:"",icon:"📌",color:CAT_COLORS[0]});
   }
   function deleteCategory(id){
+    if(!window.confirm("Delete this category? SOPs using it will show as uncategorized.")) return;
     onUpdateSopCats(sopCats.filter(c=>c.id!==id));
     if(templates.some(t=>t.categoryId===id)) onUpdateTemplates(templates.map(t=>t.categoryId===id?{...t,categoryId:null}:t));
   }
@@ -2583,6 +2589,7 @@ function TileStockScreen({designs,movements,tileCats,user,isAdmin,onUpdateDesign
     setNewCat({name:"",icon:"🧱",color:CAT_COLORS[0]});
   }
   function deleteCategory(id){
+    if(!window.confirm("Delete this category? Tile designs using it will show as uncategorized.")) return;
     onUpdateTileCats(tileCats.filter(c=>c.id!==id));
     if(designs.some(d=>d.categoryId===id)) onUpdateDesigns(designs.map(d=>d.categoryId===id?{...d,categoryId:null}:d));
   }
@@ -2618,7 +2625,7 @@ function TileStockScreen({designs,movements,tileCats,user,isAdmin,onUpdateDesign
     else onUpdateDesigns([design,...designs]);
     setShowAdd(false); setEditDesign(null);
   }
-  function deactivateDesign(id){ onUpdateDesigns(designs.map(d=>d.id===id?{...d,active:false}:d)); setShowAdd(false); }
+  function deactivateDesign(id){ if(!window.confirm("Deactivate this tile design? It will disappear from the active list.")) return; onUpdateDesigns(designs.map(d=>d.id===id?{...d,active:false}:d)); setShowAdd(false); }
 
   function logMovement(){
     const q=parseFloat(moveQty);
@@ -2890,6 +2897,7 @@ function AttendanceScreen({attendance,shopUsers,user,isAdmin,onUpdate}){
     setEditRec(null);
   }
   function deleteRecord(){
+    if(!window.confirm("Delete this attendance record?")) return;
     if(editRec.existing) onUpdate(attendance.filter(a=>a.id!==editRec.existing.id));
     setEditRec(null);
   }
@@ -3055,6 +3063,11 @@ export default function App(){
   const [attendance,setAttendance]       = useState([]);
   const [loading,setLoading]         = useState(true);
   const [toast,setToast]             = useState(null);
+
+  useEffect(()=>{
+    window._showSaveError=()=>setToast("⚠️ Couldn't save — check your connection");
+    return ()=>{ window._showSaveError=null; };
+  },[]);
   const [showUserMgmt,setShowUserMgmt] = useState(false);
 
   // Restore session from localStorage on mount (24 hour expiry)
@@ -3085,6 +3098,16 @@ export default function App(){
     },5000);
     return()=>clearInterval(sharedInterval);
   },[]);
+
+  // Tag this device with who's currently logged in + which shop, so
+  // server-side notifications can target "admin only" or "this shop only"
+  // instead of broadcasting to every device. Re-runs on shop switch too.
+  useEffect(()=>{
+    if(!user||!currentShop||!currentUser) return;
+    if(window.pushSetTags){
+      window.pushSetTags({ role: currentUser.role||"staff", shop: currentShop.id, name: user });
+    }
+  },[user,currentShop,currentUser]);
 
   // Load shop data when shop is selected
   useEffect(()=>{
@@ -3137,7 +3160,7 @@ export default function App(){
     added.forEach(t=>{
       if(window.pushNotify){
         const tag=t.priority==="high"?"🔴 HIGH — ":"";
-        window.pushNotify(`✅ New Task — ${t.title}`,`${tag}Assigned to ${t.assignedTo} by ${t.assignedBy}`);
+        window.pushNotify(`✅ New Task — ${t.title}`,`${tag}Assigned to ${t.assignedTo} by ${t.assignedBy}`,{shop:sid,name:t.assignedTo});
       }
     });
   }
@@ -3149,7 +3172,8 @@ export default function App(){
         const urgentTag=r.priority==="urgent"?"🔴 URGENT — ":"";
         window.pushNotify(
           `${urgentTag}Item Request from ${r.fromShop.name}`,
-          `${r.items.slice(0,2).map(i=>i.name).join(", ")} → ${r.toShop.name}`
+          `${r.items.slice(0,2).map(i=>i.name).join(", ")} → ${r.toShop.name}`,
+          {shop:r.toShop.id}
         );
       }
     });
@@ -3165,10 +3189,10 @@ export default function App(){
     next.forEach(rec=>{
       const prev=attendance.find(a=>a.id===rec.id);
       if(!prev && rec.checkIn && window.pushNotify){
-        window.pushNotify(`🕐 ${rec.staffName} checked in`, `${currentShop.name} · ${fmtClockTime(rec.checkIn)}`);
+        window.pushNotify(`🕐 ${rec.staffName} checked in`, `${currentShop.name} · ${fmtClockTime(rec.checkIn)}`, {shop:sid,role:"admin"});
       } else if(prev && !prev.checkOut && rec.checkOut && window.pushNotify){
         const mins=Math.round((new Date(rec.checkOut)-new Date(rec.checkIn))/60000);
-        window.pushNotify(`🕐 ${rec.staffName} checked out`, `${currentShop.name} · ${fmtClockTime(rec.checkOut)} (worked ${Math.floor(mins/60)}h ${mins%60}m)`);
+        window.pushNotify(`🕐 ${rec.staffName} checked out`, `${currentShop.name} · ${fmtClockTime(rec.checkOut)} (worked ${Math.floor(mins/60)}h ${mins%60}m)`, {shop:sid,role:"admin"});
       }
     });
     setAttendance(next);
@@ -3183,7 +3207,7 @@ export default function App(){
     justCompleted.forEach(r=>{
       if(window.pushNotify){
         const tpl=sopTemplates.find(t=>t.id===r.sopId);
-        window.pushNotify(`🗓️ ${tpl?tpl.title:"SOP"} completed`,`Done by ${r.completedBy||user}`);
+        window.pushNotify(`🗓️ ${tpl?tpl.title:"SOP"} completed`,`Done by ${r.completedBy||user}`,{shop:sid,role:"admin"});
       }
     });
   }
@@ -3193,22 +3217,22 @@ export default function App(){
     saveCustOrders(custOrders.some(o=>o.id===order.id)?custOrders.map(o=>o.id===order.id?order:o):[order,...custOrders]);
     if(isNew && window.pushNotify){
       const items=order.items.slice(0,2).map(i=>i.name).join(", ")+(order.items.length>2?` +${order.items.length-2} more`:"");
-      window.pushNotify(`🛒 New Order — ${order.customerName}`,`${items} · added by ${user}`);
+      window.pushNotify(`🛒 New Order — ${order.customerName}`,`${items} · added by ${user}`,{shop:sid});
     } else if(!isNew && window.pushNotify){
-      window.pushNotify(`✏️ Order Updated — ${order.customerName}`,`Edited by ${user}`);
+      window.pushNotify(`✏️ Order Updated — ${order.customerName}`,`Edited by ${user}`,{shop:sid});
     }
   }
   function updateOrder(order){
     const prev=custOrders.find(o=>o.id===order.id);
     saveCustOrders(custOrders.map(o=>o.id===order.id?order:o));
     if(order.status==="ready"&&prev&&prev.status!=="ready"&&window.pushNotify){
-      window.pushNotify(`✅ Ready for Pickup — ${order.customerName}`,`Confirmed by ${user}`);
+      window.pushNotify(`✅ Ready for Pickup — ${order.customerName}`,`Confirmed by ${user}`,{shop:sid});
     }
     if(order.status==="processing"&&prev&&prev.status==="new"&&window.pushNotify){
-      window.pushNotify(`⚙️ Order In Progress — ${order.customerName}`,`Being processed by ${user}`);
+      window.pushNotify(`⚙️ Order In Progress — ${order.customerName}`,`Being processed by ${user}`,{shop:sid});
     }
   }
-  function deleteOrder(id){ saveCustOrders(custOrders.filter(o=>o.id!==id)); }
+  function deleteOrder(id){ if(!window.confirm("Delete this order? This can't be undone.")) return; saveCustOrders(custOrders.filter(o=>o.id!==id)); }
 
   const badges={
     orders:  custOrders.filter(o=>o.status==="new"||o.status==="processing").length,
