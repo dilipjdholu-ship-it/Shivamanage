@@ -81,13 +81,15 @@
     });
 
     // pushNotify calls our Netlify function which proxies to OneSignal server-side
-    // This avoids CORS errors that happen when calling OneSignal directly from browser
-    window.pushNotify = async function(title, message) {
+    // This avoids CORS errors that happen when calling OneSignal directly from browser.
+    // target (optional) narrows who receives it, e.g. {shop:"shivam"} or
+    // {shop:"shivam", role:"admin"} — matches the tags set by pushSetTags below.
+    window.pushNotify = async function(title, message, target) {
       try {
         const res = await fetch("https://shivamanage.netlify.app/.netlify/functions/push", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: title, message: message })
+          body: JSON.stringify({ title: title, message: message, target: target || null })
         });
         const data = await res.json();
         if (data.errors) {
@@ -98,6 +100,19 @@
       } catch(e) {
         window._showPushResult("❌ " + e.message);
       }
+    };
+
+    // Tags the current device/subscription with who's logged in right now, so
+    // server-side sends can target "admin only" or "this shop only" instead of
+    // broadcasting to every device. Called on login and on shop switch — safe
+    // to call repeatedly, it just overwrites the previous values. A shared
+    // device (e.g. a counter tablet) simply carries whoever is currently
+    // logged in.
+    window.pushSetTags = function(tags) {
+      if (!window.OneSignalDeferred) return;
+      window.OneSignalDeferred.push(function(OneSignal) {
+        OneSignal.User.addTags(tags);
+      });
     };
 
     // Show result as a toast on screen
@@ -117,6 +132,18 @@
   </script>
 </head>
 <body>
+  <div id="offline-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#DC2626;color:#fff;text-align:center;font-size:12px;font-weight:600;font-family:Inter,sans-serif;padding:8px 12px;padding-top:calc(8px + env(safe-area-inset-top,0px))">
+    ⚠️ You're offline — changes won't save until you're back online
+  </div>
+  <script>
+    function _updateOnlineBanner(){
+      var el = document.getElementById('offline-banner');
+      if (el) el.style.display = navigator.onLine ? 'none' : 'block';
+    }
+    window.addEventListener('online', _updateOnlineBanner);
+    window.addEventListener('offline', _updateOnlineBanner);
+    _updateOnlineBanner();
+  </script>
   <div id="root">
     <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;min-height:100dvh;background:#1A2D5A;color:rgba(255,255,255,.4);font-size:14px;font-family:Inter,sans-serif;">
       Loading…
@@ -133,6 +160,7 @@
     };
   </script>
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -147,17 +175,26 @@
       appId:"1:698237275798:web:698dd5f1cfee55b4cc7cb7"
     });
     const _db=firebase.database();
+    // Anonymous auth gives every request a real Firebase auth token, so
+    // Security Rules can require auth != null instead of being wide open.
+    // It's best-effort: if it fails (e.g. Anonymous sign-in isn't enabled yet
+    // in the Firebase console), storage calls below still proceed rather than
+    // hard-blocking the app — they just won't satisfy a rule that requires
+    // auth once one is added. See README for the required setup order.
+    const _authReady = firebase.auth().signInAnonymously().catch(function(e){
+      console.warn('Anonymous auth failed (app still works against open rules):', e.message);
+    });
     window.storage={
       get:async function(key){
-        try{var k=key.replace(/[/]/g,'__sl__').replace(/[.]/g,'__dt__');var s=await _db.ref('store/'+k).get();return s.exists()?{key:key,value:s.val()}:null;}
+        try{await _authReady; var k=key.replace(/[/]/g,'__sl__').replace(/[.]/g,'__dt__');var s=await _db.ref('store/'+k).get();return s.exists()?{key:key,value:s.val()}:null;}
         catch(e){console.error('get',key,e);return null;}
       },
       set:async function(key,value){
-        try{var k=key.replace(/[/]/g,'__sl__').replace(/[.]/g,'__dt__');await _db.ref('store/'+k).set(value);return{key:key,value:value};}
+        try{await _authReady; var k=key.replace(/[/]/g,'__sl__').replace(/[.]/g,'__dt__');await _db.ref('store/'+k).set(value);return{key:key,value:value};}
         catch(e){console.error('set',key,e);return null;}
       },
       delete:async function(key){
-        try{var k=key.replace(/[/]/g,'__sl__').replace(/[.]/g,'__dt__');await _db.ref('store/'+k).remove();return{key:key,deleted:true};}
+        try{await _authReady; var k=key.replace(/[/]/g,'__sl__').replace(/[.]/g,'__dt__');await _db.ref('store/'+k).remove();return{key:key,deleted:true};}
         catch(e){return null;}
       }
     };
@@ -515,9 +552,14 @@ async function sget(k) {
 async function sset(k, v) {
   try {
     const result = await window.storage.set(k, JSON.stringify(v), true);
+    if (!result) {
+      if (window._showSaveError) window._showSaveError();
+      return false;
+    }
     return true;
   } catch (e) {
     console.error("sset failed:", k, e);
+    if (window._showSaveError) window._showSaveError();
     return false;
   }
 }
@@ -3490,8 +3532,10 @@ function OrderDetailModal({
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      onDelete(order.id);
-      onClose();
+      if (window.confirm("Delete this order? This can't be undone.")) {
+        onDelete(order.id);
+        onClose();
+      }
     },
     style: {
       fontSize: 12,
@@ -3786,6 +3830,7 @@ function ReorderScreen({
     onUpdateCats(cats.map(c => c.id === updated.id ? updated : c));
   }
   function deleteCat(id) {
+    if (!window.confirm("Delete this whole category and all its items?")) return;
     onUpdateCats(cats.filter(c => c.id !== id));
   }
   function toggleSel(id, forceRemove = false) {
@@ -4177,7 +4222,7 @@ function ReorderScreen({
       }, "📅 ", fmtDate(item.orderDueDate)))), !selMode && /*#__PURE__*/React.createElement("button", {
         onClick: e => {
           e.stopPropagation();
-          onUpdateCats(cats.map(c => c.id === cat.id ? {
+          if (window.confirm("Remove this item from the reorder list?")) onUpdateCats(cats.map(c => c.id === cat.id ? {
             ...c,
             items: c.items.filter(i => i.id !== item.id)
           } : c));
@@ -4853,6 +4898,7 @@ function TasksScreen({
     if (openTask?.id === updated.id) setOpenTask(updated);
   }
   function deleteTask(id) {
+    if (!window.confirm("Delete this task?")) return;
     onUpdateTasks(tasks.filter(t => t.id !== id));
     setOpenTask(null);
   }
@@ -5934,8 +5980,10 @@ function SharedRequestDetail({
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      onDelete(req.id);
-      onClose();
+      if (window.confirm("Delete this shared request?")) {
+        onDelete(req.id);
+        onClose();
+      }
     },
     style: {
       fontSize: 12,
@@ -6233,6 +6281,7 @@ function PriceListScreen({
     setEditItem(null);
   }
   function deleteItem(id) {
+    if (!window.confirm("Delete this price list item?")) return;
     onUpdateItems(priceItems.filter(i => i.id !== id));
   }
   async function uploadDoc(e) {
@@ -6550,7 +6599,9 @@ function PriceListScreen({
       border: `1px solid ${C.border}`
     }
   }, "View"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => onUpdateDocs(priceDocs.filter(d => d.id !== doc.id)),
+    onClick: () => {
+      if (window.confirm("Delete this document?")) onUpdateDocs(priceDocs.filter(d => d.id !== doc.id));
+    },
     style: {
       fontSize: 13,
       color: C.danger,
@@ -6881,6 +6932,7 @@ function SOPsScreen({
     setEditTpl(null);
   }
   function deactivateTemplate(id) {
+    if (!window.confirm("Deactivate this SOP? It will disappear from the active list.")) return;
     onUpdateTemplates(templates.map(t => t.id === id ? {
       ...t,
       active: false
@@ -6908,6 +6960,7 @@ function SOPsScreen({
     });
   }
   function deleteCategory(id) {
+    if (!window.confirm("Delete this category? SOPs using it will show as uncategorized.")) return;
     onUpdateSopCats(sopCats.filter(c => c.id !== id));
     if (templates.some(t => t.categoryId === id)) onUpdateTemplates(templates.map(t => t.categoryId === id ? {
       ...t,
@@ -7637,6 +7690,7 @@ function TileStockScreen({
     });
   }
   function deleteCategory(id) {
+    if (!window.confirm("Delete this category? Tile designs using it will show as uncategorized.")) return;
     onUpdateTileCats(tileCats.filter(c => c.id !== id));
     if (designs.some(d => d.categoryId === id)) onUpdateDesigns(designs.map(d => d.categoryId === id ? {
       ...d,
@@ -7694,6 +7748,7 @@ function TileStockScreen({
     setEditDesign(null);
   }
   function deactivateDesign(id) {
+    if (!window.confirm("Deactivate this tile design? It will disappear from the active list.")) return;
     onUpdateDesigns(designs.map(d => d.id === id ? {
       ...d,
       active: false
@@ -8464,6 +8519,7 @@ function AttendanceScreen({
     setEditRec(null);
   }
   function deleteRecord() {
+    if (!window.confirm("Delete this attendance record?")) return;
     if (editRec.existing) onUpdate(attendance.filter(a => a.id !== editRec.existing.id));
     setEditRec(null);
   }
@@ -8877,6 +8933,12 @@ function App() {
   const [attendance, setAttendance] = useState([]);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
+  useEffect(() => {
+    window._showSaveError = () => setToast("⚠️ Couldn't save — check your connection");
+    return () => {
+      window._showSaveError = null;
+    };
+  }, []);
   const [showUserMgmt, setShowUserMgmt] = useState(false);
 
   // Restore session from localStorage on mount (24 hour expiry)
@@ -8913,6 +8975,20 @@ function App() {
     }, 5000);
     return () => clearInterval(sharedInterval);
   }, []);
+
+  // Tag this device with who's currently logged in + which shop, so
+  // server-side notifications can target "admin only" or "this shop only"
+  // instead of broadcasting to every device. Re-runs on shop switch too.
+  useEffect(() => {
+    if (!user || !currentShop || !currentUser) return;
+    if (window.pushSetTags) {
+      window.pushSetTags({
+        role: currentUser.role || "staff",
+        shop: currentShop.id,
+        name: user
+      });
+    }
+  }, [user, currentShop, currentUser]);
 
   // Load shop data when shop is selected
   useEffect(() => {
@@ -9004,7 +9080,10 @@ function App() {
     added.forEach(t => {
       if (window.pushNotify) {
         const tag = t.priority === "high" ? "🔴 HIGH — " : "";
-        window.pushNotify(`✅ New Task — ${t.title}`, `${tag}Assigned to ${t.assignedTo} by ${t.assignedBy}`);
+        window.pushNotify(`✅ New Task — ${t.title}`, `${tag}Assigned to ${t.assignedTo} by ${t.assignedBy}`, {
+          shop: sid,
+          name: t.assignedTo
+        });
       }
     });
   }
@@ -9015,7 +9094,9 @@ function App() {
     added.forEach(r => {
       if (window.pushNotify) {
         const urgentTag = r.priority === "urgent" ? "🔴 URGENT — " : "";
-        window.pushNotify(`${urgentTag}Item Request from ${r.fromShop.name}`, `${r.items.slice(0, 2).map(i => i.name).join(", ")} → ${r.toShop.name}`);
+        window.pushNotify(`${urgentTag}Item Request from ${r.fromShop.name}`, `${r.items.slice(0, 2).map(i => i.name).join(", ")} → ${r.toShop.name}`, {
+          shop: r.toShop.id
+        });
       }
     });
   }
@@ -9051,10 +9132,16 @@ function App() {
     next.forEach(rec => {
       const prev = attendance.find(a => a.id === rec.id);
       if (!prev && rec.checkIn && window.pushNotify) {
-        window.pushNotify(`🕐 ${rec.staffName} checked in`, `${currentShop.name} · ${fmtClockTime(rec.checkIn)}`);
+        window.pushNotify(`🕐 ${rec.staffName} checked in`, `${currentShop.name} · ${fmtClockTime(rec.checkIn)}`, {
+          shop: sid,
+          role: "admin"
+        });
       } else if (prev && !prev.checkOut && rec.checkOut && window.pushNotify) {
         const mins = Math.round((new Date(rec.checkOut) - new Date(rec.checkIn)) / 60000);
-        window.pushNotify(`🕐 ${rec.staffName} checked out`, `${currentShop.name} · ${fmtClockTime(rec.checkOut)} (worked ${Math.floor(mins / 60)}h ${mins % 60}m)`);
+        window.pushNotify(`🕐 ${rec.staffName} checked out`, `${currentShop.name} · ${fmtClockTime(rec.checkOut)} (worked ${Math.floor(mins / 60)}h ${mins % 60}m)`, {
+          shop: sid,
+          role: "admin"
+        });
       }
     });
     setAttendance(next);
@@ -9070,7 +9157,10 @@ function App() {
     justCompleted.forEach(r => {
       if (window.pushNotify) {
         const tpl = sopTemplates.find(t => t.id === r.sopId);
-        window.pushNotify(`🗓️ ${tpl ? tpl.title : "SOP"} completed`, `Done by ${r.completedBy || user}`);
+        window.pushNotify(`🗓️ ${tpl ? tpl.title : "SOP"} completed`, `Done by ${r.completedBy || user}`, {
+          shop: sid,
+          role: "admin"
+        });
       }
     });
   }
@@ -9079,22 +9169,31 @@ function App() {
     saveCustOrders(custOrders.some(o => o.id === order.id) ? custOrders.map(o => o.id === order.id ? order : o) : [order, ...custOrders]);
     if (isNew && window.pushNotify) {
       const items = order.items.slice(0, 2).map(i => i.name).join(", ") + (order.items.length > 2 ? ` +${order.items.length - 2} more` : "");
-      window.pushNotify(`🛒 New Order — ${order.customerName}`, `${items} · added by ${user}`);
+      window.pushNotify(`🛒 New Order — ${order.customerName}`, `${items} · added by ${user}`, {
+        shop: sid
+      });
     } else if (!isNew && window.pushNotify) {
-      window.pushNotify(`✏️ Order Updated — ${order.customerName}`, `Edited by ${user}`);
+      window.pushNotify(`✏️ Order Updated — ${order.customerName}`, `Edited by ${user}`, {
+        shop: sid
+      });
     }
   }
   function updateOrder(order) {
     const prev = custOrders.find(o => o.id === order.id);
     saveCustOrders(custOrders.map(o => o.id === order.id ? order : o));
     if (order.status === "ready" && prev && prev.status !== "ready" && window.pushNotify) {
-      window.pushNotify(`✅ Ready for Pickup — ${order.customerName}`, `Confirmed by ${user}`);
+      window.pushNotify(`✅ Ready for Pickup — ${order.customerName}`, `Confirmed by ${user}`, {
+        shop: sid
+      });
     }
     if (order.status === "processing" && prev && prev.status === "new" && window.pushNotify) {
-      window.pushNotify(`⚙️ Order In Progress — ${order.customerName}`, `Being processed by ${user}`);
+      window.pushNotify(`⚙️ Order In Progress — ${order.customerName}`, `Being processed by ${user}`, {
+        shop: sid
+      });
     }
   }
   function deleteOrder(id) {
+    if (!window.confirm("Delete this order? This can't be undone.")) return;
     saveCustOrders(custOrders.filter(o => o.id !== id));
   }
   const badges = {
